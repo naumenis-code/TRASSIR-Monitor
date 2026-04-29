@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor v12.0 — ПОЛНАЯ ФИНАЛЬНАЯ ВЕРСИЯ
+# TRASSIR Monitor v12.0
 # Проверено на Debian 12
 # ============================================
 set -e
@@ -23,9 +23,9 @@ clear
 # Баннер
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
-echo -e "${GREEN}║   TRASSIR Monitor v12.0 — Final Complete      ║${NC}"
-echo -e "${GREEN}║   Имена каналов • Алерты • Live дашборд       ║${NC}"
-echo -e "${GREEN}║   Debian 11/12/13 • Ничего не урезано         ║${NC}"
+echo -e "${GREEN}║   TRASSIR Monitor v12.0 — Final Complete     ║${NC}"
+echo -e "${GREEN}║   Имена каналов • Алерты • Live дашборд      ║${NC}"
+echo -e "${GREEN}║   Debian 11/12/13 • Ничего не урезано        ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -3002,7 +3002,7 @@ HTTP=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:$WEB_PORT/ 2>/dev
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
-echo -e "${GREEN}║   TRASSIR Monitor v12.0 — УСТАНОВЛЕН!         ║${NC}"
+echo -e "${GREEN}║   TRASSIR Monitor v12.0 — УСТАНОВЛЕН!        ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
