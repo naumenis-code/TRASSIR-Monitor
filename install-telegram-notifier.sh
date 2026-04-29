@@ -138,7 +138,6 @@ echo ""
 echo -e "  ${BOLD}3. HTTP-прокси для Telegram${NC}"
 echo -e "     Укажите если Telegram заблокирован в вашей сети"
 echo -e "     Формат: http://login:password@host:port"
-echo -e "     Пример: http://user:pass@94.181.188.155:3139"
 echo -e "     Оставьте пустым для прямого подключения"
 echo ""
 read -p "     Прокси (Enter — без прокси): " TG_PROXY
