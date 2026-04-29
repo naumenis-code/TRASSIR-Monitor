@@ -764,7 +764,10 @@ def collect():
                     "uptime_s": health["uptime"],
                     "disks": health["disks"],
                     "rt": health["rt"],
-                    "alerts": len(alerts_list)
+                    "alerts": conn.execute(
+                        "SELECT COUNT(*) as cnt FROM alerts WHERE server_id = ? AND ack = 0",
+                        (server_id,)
+                    ).fetchone()["cnt"]
                 })
             else:
                 # Сервер не ответил
