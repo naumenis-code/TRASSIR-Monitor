@@ -1,7 +1,6 @@
 #!/bin/bash
 # ============================================
 # TRASSIR Monitor — Telegram Bot Installer v6.0 FINAL
-# АБСОЛЮТНО ПОЛНАЯ ВЕРСИЯ — 1500+ СТРОК
 # ============================================
 # Все надписи на русском языке
 # Формат уведомлений как в примере
@@ -37,7 +36,6 @@ echo -e "${CYAN}║   TRASSIR Monitor — Telegram Bot v6.0 FINAL  ║${NC}"
 echo -e "${CYAN}║   Автономный демон + Web-управление          ║${NC}"
 echo -e "${CYAN}║   HTTP-прокси • Много получателей            ║${NC}"
 echo -e "${CYAN}║   Debian 11/12/13                            ║${NC}"
-echo -e "${CYAN}║   ПОЛНАЯ ВЕРСИЯ — 1500+ строк                ║${NC}"
 echo -e "${CYAN}║   Русский язык                               ║${NC}"
 echo -e "${CYAN}║                                              ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
@@ -138,7 +136,6 @@ echo ""
 echo -e "  ${BOLD}3. HTTP-прокси для Telegram${NC}"
 echo -e "     Укажите если Telegram заблокирован в вашей сети"
 echo -e "     Формат: http://login:password@host:port"
-echo -e "     Пример: http://user:pass@94.181.188.155:3139"
 echo -e "     Оставьте пустым для прямого подключения"
 echo ""
 read -p "     Прокси (Enter — без прокси): " TG_PROXY
