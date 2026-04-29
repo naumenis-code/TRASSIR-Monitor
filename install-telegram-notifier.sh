@@ -602,19 +602,19 @@ def format_alert_message(alert_data):
         header = '🚨 КРИТИЧЕСКИЙ АЛЕРТ'
     elif 'камер' in msg_lower or 'camera' in msg_lower:
         emoji = '📷'
-        header = '📷 ОТВАЛ КАМЕР'
+        header = 'ОТВАЛ КАМЕР'
     elif 'cpu' in msg_lower or 'процессор' in msg_lower:
         emoji = '🔥'
-        header = '🔥 ВЫСОКАЯ НАГРУЗКА CPU'
+        header = 'ВЫСОКАЯ НАГРУЗКА CPU'
     elif 'архив' in msg_lower or 'archive' in msg_lower:
         emoji = '💾'
-        header = '💾 ПРОБЛЕМА С АРХИВОМ'
+        header = 'ПРОБЛЕМА С АРХИВОМ'
     elif 'диск' in msg_lower or 'disk' in msg_lower:
         emoji = '💿'
-        header = '💿 ОШИБКА ДИСКОВ'
+        header = 'ОШИБКА ДИСКОВ'
     else:
         emoji = '🟡'
-        header = '⚠ ПРЕДУПРЕЖДЕНИЕ'
+        header = 'ПРЕДУПРЕЖДЕНИЕ'
     
     cfg = get_config()
     monitor_url = cfg.get('monitor_url', '') if cfg else ''
