@@ -138,6 +138,7 @@ echo ""
 echo -e "  ${BOLD}3. HTTP-прокси для Telegram${NC}"
 echo -e "     Укажите если Telegram заблокирован в вашей сети"
 echo -e "     Формат: http://login:password@host:port"
+echo -e "     Пример: http://user:pass@94.181.188.155:3139"
 echo -e "     Оставьте пустым для прямого подключения"
 echo ""
 read -p "     Прокси (Enter — без прокси): " TG_PROXY
@@ -633,7 +634,7 @@ def format_alert_message(alert_data):
 
 📊 <b>Текущее состояние сервера:</b>
   • Загрузка процессора: <b>{cpu_str}</b>
-  • Камер онлайн: <b>{health.get('ch_o', '?')} из {health.get('ch_t', '?')}</b>
+  • Камер онлайн: <b>{health.get('ch_online', '?')} из {health.get('ch_total', '?')}</b>
   • Глубина архива: <b>{arch_str}</b>
   • Время работы (uptime): <b>{format_uptime(health.get('uptime', 0))}</b>
   • Время отклика: <b>{health.get('rt', '?')} мс</b>
@@ -737,8 +738,8 @@ def get_new_alerts():
             else:
                 alert_dict['health'] = {
                     'cpu': '?',
-                    'ch_o': '?',
-                    'ch_t': '?',
+                    'ch_online': '?',
+                    'ch_total': '?',
                     'arch': '?',
                     'uptime': 0,
                     'rt': '?'
