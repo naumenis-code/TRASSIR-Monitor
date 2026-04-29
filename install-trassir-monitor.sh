@@ -2613,6 +2613,33 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
 
 {% block content %}
 
+<style>
+    /* Исправление цвета текста в полях ввода на странице настроек */
+    #settingsForm .form-control {
+        background: #0a0d14 !important;
+        border: 1px solid #252b36 !important;
+        color: #d1d5db !important;
+    }
+    
+    #settingsForm .form-control:focus {
+        background: #0a0d14 !important;
+        border-color: #667eea !important;
+        color: #ffffff !important;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
+    }
+    
+    /* Стили для placeholder (подсказок в полях) */
+    #settingsForm .form-control::placeholder {
+        color: #6b7280 !important;
+        opacity: 1 !important;
+    }
+    
+    /* Стили для маленького текста под полями */
+    #settingsForm .text-muted {
+        color: #6b7280 !important;
+    }
+</style>
+
 <!-- Навигация -->
 <nav class="mb-4">
     <a href="/" class="btn btn-outline-light btn-sm">
