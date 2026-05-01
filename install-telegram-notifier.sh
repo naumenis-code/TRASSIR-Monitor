@@ -861,14 +861,18 @@ def get_new_alerts():
         ).fetchall()
 
         result = []
-        for row in list(alerts_rows) + list(recovery_rows):
+        for row in list(alerts_rows):
             d = dict(row)
             d['health'] = get_health_for_server(conn, d['server_id'])
-            # Для восстановлений считаем время простоя
-            if d['level'] == 'info' or 'восстановлен' in d['msg'].lower():
-                d['downtime'] = calc_downtime_for_alert(conn, d)
-            else:
-                d['downtime'] = ''
+            d['downtime'] = ''
+            d['is_recovery'] = False
+            result.append(d)
+
+        for row in list(recovery_rows):
+            d = dict(row)
+            d['health'] = get_health_for_server(conn, d['server_id'])
+            d['downtime'] = calc_downtime_for_alert(conn, d)
+            d['is_recovery'] = True  # восстановления всегда отправляются
             result.append(d)
 
         return result
@@ -1003,11 +1007,14 @@ def run_bot():
                     lvl = alert['level']
 
                     # Фильтрация по типу алерта
-                    if lvl == 'critical' and not chat.get('critical', True):
+                    # Восстановления (is_recovery=True) отправляются ВСЕГДА — не зависят от флага info
+                    if alert.get('is_recovery'):
+                        pass  # пропускаем фильтры, восстановление важно всегда
+                    elif lvl == 'critical' and not chat.get('critical', True):
                         continue
-                    if lvl == 'warning' and not chat.get('warning', True):
+                    elif lvl == 'warning' and not chat.get('warning', True):
                         continue
-                    if lvl == 'info' and not chat.get('info', False):
+                    elif lvl == 'info' and not chat.get('info', False):
                         continue
 
                     if send_telegram_message(chat_id, text):
