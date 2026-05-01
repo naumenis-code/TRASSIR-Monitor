@@ -1,12 +1,15 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor — Mail Notifier Installer v1.0
+# TRASSIR Monitor — Mail Notifier Installer v1.1 FIXED
 # ============================================
 # Автономный демон отправки алертов по Email
 # Настройка SMTP через веб-интерфейс /settings
 # Поддержка нескольких получателей
 # Debian 11/12/13
 # Русский язык
+# Исправлено:
+#   - Уведомления о восстановлении каналов и серверов
+#   - Расчёт времени простоя
 # ============================================
 set -e
 
@@ -31,7 +34,7 @@ clear
 
 echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                              ║${NC}"
-echo -e "${CYAN}║   TRASSIR Monitor — Mail Notifier v1.0       ║${NC}"
+echo -e "${CYAN}║   TRASSIR Monitor — Mail Notifier v1.1       ║${NC}"
 echo -e "${CYAN}║   Автономный демон Email-уведомлений         ║${NC}"
 echo -e "${CYAN}║   Настройка через веб-интерфейс              ║${NC}"
 echo -e "${CYAN}║   Восстановление каналов и серверов          ║${NC}"
@@ -347,7 +350,7 @@ echo -e "${GREEN}✅ База данных инициализирована${NC}
 echo ""
 
 # ============================================
-# ШАГ 2: СОЗДАНИЕ ДЕМОНА mail_bot.py
+# ШАГ 2: СОЗДАНИЕ ДЕМОНА mail_bot.py (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 # ============================================
 
 echo -e "${YELLOW}══════════════════════════════════════════════${NC}"
@@ -360,25 +363,24 @@ echo "  • Генерация mail_bot.py..."
 cat > "$MAILBOT_PY" << 'MAILBOTEOF'
 #!/usr/bin/env python3
 """
-TRASSIR Monitor — Mail Bot Daemon v1.0
+TRASSIR Monitor — Mail Bot Daemon v1.1 FIXED
 Автономный демон Email-уведомлений
 
 Принцип работы:
 1. Проверяет таблицу alerts каждые N секунд
-2. Находит новые алерты (отсутствующие в mail_logs)
-3. Формирует красивое HTML-письмо на русском языке
-4. Отправляет всем активным получателям
-5. Помечает алерт как отправленный
+2. Находит новые алерты (включая восстановления)
+3. Вычисляет время простоя для восстановлений
+4. Формирует красивое HTML-письмо на русском языке
+5. Отправляет всем активным получателям
+6. Помечает алерт как отправленный
 
-Особенности:
-- Не зависит от основного цикла опроса серверов
-- Настройки SMTP через веб-интерфейс /settings
-- Защита от повторной отправки
-- Поддержка нескольких получателей
-- Детальное логирование
+Исправления v1.1:
+- Добавлены уведомления о восстановлении (аналог telegram-бота)
+- Добавлен расчёт времени простоя
 """
 
 import os
+import re
 import sys
 import time
 import sqlite3
@@ -448,46 +450,71 @@ def get_enabled_recipients():
 
 
 def get_new_alerts():
-    """Получает список новых алертов (ещё не отправленных по email)"""
+    """
+    Получает список новых алертов (ещё не отправленных по email).
+    Включает восстановления каналов и серверов.
+    """
     conn = get_db()
     try:
-        query = """
-            SELECT
-                a.id,
-                a.server_id,
-                a.level,
-                a.msg,
-                a.ts,
-                a.ack,
-                COALESCE(a.event_type, '') as event_type,
-                s.name as server_name,
-                s.ip as server_ip
-            FROM alerts a
-            JOIN servers s ON a.server_id = s.id
-            WHERE a.ack = 0
-            AND a.id NOT IN (
-                SELECT DISTINCT CAST(alert_key AS INTEGER)
-                FROM mail_logs
-                WHERE alert_key GLOB '[0-9]*'
-            )
-            ORDER BY a.ts ASC
-        """
-        alerts = conn.execute(query).fetchall()
+        # Обычные алерты (warning, critical)
+        alerts_rows = conn.execute(
+            """SELECT
+                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
+                   s.name as server_name, s.ip as server_ip
+               FROM alerts a
+               JOIN servers s ON a.server_id = s.id
+               WHERE a.ack = 0
+                 AND a.level IN ('warning', 'critical')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM mail_logs ml
+                     WHERE ml.alert_key = CAST(a.id AS TEXT)
+                 )
+               ORDER BY a.ts ASC"""
+        ).fetchall()
+
+        # Восстановления (info + ключевые слова)
+        recovery_rows = conn.execute(
+            """SELECT
+                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
+                   s.name as server_name, s.ip as server_ip
+               FROM alerts a
+               JOIN servers s ON a.server_id = s.id
+               WHERE a.level = 'info'
+                 AND (
+                       a.msg LIKE '%восстановлен%'
+                    OR a.msg LIKE '%restored%'
+                    OR a.msg LIKE '%back online%'
+                    OR a.msg LIKE '%вернулся%'
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM mail_logs ml
+                     WHERE ml.alert_key = CAST(a.id AS TEXT)
+                 )
+               ORDER BY a.ts ASC"""
+        ).fetchall()
+
         result = []
-        for alert in alerts:
-            alert_dict = dict(alert)
+        for row in list(alerts_rows) + list(recovery_rows):
+            d = dict(row)
+            # Получаем health
             health_row = conn.execute(
                 """SELECT cpu, disks, ch_total, ch_online, arch, uptime, rt
                    FROM health
                    WHERE server_id = ?
                    ORDER BY ts DESC LIMIT 1""",
-                (alert['server_id'],)
+                (d['server_id'],)
             ).fetchone()
-            alert_dict['health'] = dict(health_row) if health_row else {
+            d['health'] = dict(health_row) if health_row else {
                 'cpu': '?', 'ch_online': '?', 'ch_total': '?',
                 'arch': '?', 'uptime': 0, 'rt': '?'
             }
-            result.append(alert_dict)
+            # Для восстановлений считаем время простоя
+            if d['level'] == 'info' or 'восстановлен' in d['msg'].lower():
+                d['downtime'] = calc_downtime_for_alert(conn, d)
+            else:
+                d['downtime'] = ''
+            result.append(d)
+
         return result
     except Exception as e:
         print(f"[{datetime.now()}] ❌ Ошибка получения алертов: {e}")
@@ -495,6 +522,82 @@ def get_new_alerts():
         return []
     finally:
         conn.close()
+
+
+def calc_downtime_for_alert(conn, alert):
+    """
+    Вычисляет время простоя для алерта о восстановлении.
+    Логика полностью повторяет telegram-бота.
+    """
+    msg = alert['msg']
+    server_id = alert['server_id']
+    recovery_ts_str = alert['ts']
+
+    try:
+        recovery_dt = datetime.strptime(recovery_ts_str, '%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return ''
+
+    # Попытка 1: восстановление канала (камеры)
+    channel_match = re.search(r'#\d+\s+[^\,\]\n]+', msg)
+    if channel_match:
+        channel_name = channel_match.group(0).strip()
+        try:
+            offline_row = conn.execute(
+                """SELECT ts FROM alerts
+                   WHERE server_id = ?
+                     AND (msg LIKE '%' || ? || '%' OR msg LIKE 'Камер офлайн%')
+                     AND ts < ?
+                   ORDER BY ts DESC LIMIT 1""",
+                (server_id, channel_name, recovery_ts_str)
+            ).fetchone()
+            if offline_row:
+                offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
+                delta = int((recovery_dt - offline_dt).total_seconds())
+                return format_downtime(delta)
+        except Exception:
+            pass
+
+    # Попытка 2: восстановление сервера
+    msg_lower = msg.lower()
+    if 'сервер' in msg_lower or 'server' in msg_lower:
+        try:
+            offline_row = conn.execute(
+                """SELECT ts FROM alerts
+                   WHERE server_id = ?
+                     AND (msg LIKE '%недоступ%' OR msg LIKE '%offline%'
+                          OR msg LIKE '%не отвечает%' OR msg LIKE '%потеря связи%'
+                          OR level = 'critical')
+                     AND ts < ?
+                   ORDER BY ts DESC LIMIT 1""",
+                (server_id, recovery_ts_str)
+            ).fetchone()
+            if offline_row:
+                offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
+                delta = int((recovery_dt - offline_dt).total_seconds())
+                return format_downtime(delta)
+        except Exception:
+            pass
+
+    # Попытка 3: по таблице health
+    try:
+        offline_health = conn.execute(
+            """SELECT ts FROM health
+               WHERE server_id = ?
+                 AND (rt IS NULL OR rt > 9000)
+                 AND ts < ?
+               ORDER BY ts DESC LIMIT 1""",
+            (server_id, recovery_ts_str)
+        ).fetchone()
+        if offline_health:
+            offline_dt = datetime.strptime(offline_health['ts'], '%Y-%m-%d %H:%M:%S')
+            delta = int((recovery_dt - offline_dt).total_seconds())
+            if delta > 0:
+                return format_downtime(delta)
+    except Exception:
+        pass
+
+    return ''
 
 
 def mark_alert_as_sent(alert_id, email, subject):
@@ -529,7 +632,7 @@ def cleanup_old_logs():
 
 
 # ============================================
-# ФОРМАТИРОВАНИЕ ПИСЬМА
+# ФОРМАТИРОВАНИЕ
 # ============================================
 
 def format_uptime(seconds):
@@ -551,74 +654,78 @@ def format_uptime(seconds):
         return f"{minutes}м"
 
 
+def format_downtime(seconds):
+    """Форматирует время простоя в читаемый вид."""
+    if not seconds or seconds <= 0:
+        return ""
+    try:
+        seconds = int(seconds)
+    except (ValueError, TypeError):
+        return ""
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    if days > 0:
+        return f"{days} дн {hours} ч {minutes} мин"
+    elif hours > 0:
+        return f"{hours} ч {minutes} мин"
+    elif minutes > 0:
+        return f"{minutes} мин {secs} сек"
+    else:
+        return f"{secs} сек"
+
+
 def get_alert_style(alert_data):
     """Определяет стиль и заголовок алерта"""
     level = alert_data.get('level', 'warning')
     message = alert_data.get('msg', '').lower()
-    event_type = alert_data.get('event_type', '')
 
-    if event_type == 'restored' or 'восстановлен' in message or 'restored' in message or 'back online' in message:
+    # Восстановления
+    if 'восстановлен' in message or 'restored' in message or 'back online' in message:
+        if 'канал' in message or 'channel' in message or 'камер' in message:
+            return {
+                'emoji': '✅', 'color': '#10b981', 'bg': '#064e3b',
+                'subject_prefix': 'ВОССТАНОВЛЕНИЕ КАМЕР', 'header': 'ВОССТАНОВЛЕНИЕ КАМЕР'
+            }
+        if 'сервер' in message or 'server' in message:
+            return {
+                'emoji': '✅', 'color': '#10b981', 'bg': '#064e3b',
+                'subject_prefix': 'СЕРВЕР ВОССТАНОВЛЕН', 'header': 'СЕРВЕР ВОССТАНОВЛЕН'
+            }
         return {
-            'emoji': '🟢',
-            'color': '#10b981',
-            'bg': '#064e3b',
-            'subject_prefix': '✅ ВОССТАНОВЛЕНИЕ',
-            'header': 'ВОССТАНОВЛЕНИЕ'
+            'emoji': '✅', 'color': '#10b981', 'bg': '#064e3b',
+            'subject_prefix': 'ВОССТАНОВЛЕНИЕ', 'header': 'ВОССТАНОВЛЕНИЕ'
         }
-    if event_type == 'server_restored' or ('сервер' in message and 'восстановл' in message):
-        return {
-            'emoji': '🟢',
-            'color': '#10b981',
-            'bg': '#064e3b',
-            'subject_prefix': '✅ СЕРВЕР ВОССТАНОВЛЕН',
-            'header': 'СЕРВЕР ВОССТАНОВЛЕН'
-        }
+
     if level == 'critical':
         return {
-            'emoji': '🔴',
-            'color': '#ef4444',
-            'bg': '#7f1d1d',
-            'subject_prefix': '🚨 КРИТИЧЕСКИЙ АЛЕРТ',
-            'header': 'КРИТИЧЕСКИЙ АЛЕРТ'
+            'emoji': '🔴', 'color': '#ef4444', 'bg': '#7f1d1d',
+            'subject_prefix': 'КРИТИЧЕСКИЙ АЛЕРТ', 'header': 'КРИТИЧЕСКИЙ АЛЕРТ'
         }
     if 'камер' in message or 'camera' in message or 'канал' in message or 'channel' in message:
         return {
-            'emoji': '📷',
-            'color': '#f59e0b',
-            'bg': '#78350f',
-            'subject_prefix': '⚠️ ОТВАЛ КАМЕР',
-            'header': 'ОТВАЛ КАМЕР'
+            'emoji': '📷', 'color': '#f59e0b', 'bg': '#78350f',
+            'subject_prefix': 'ОТВАЛ КАМЕР', 'header': 'ОТВАЛ КАМЕР'
         }
     if 'cpu' in message or 'процессор' in message:
         return {
-            'emoji': '🔥',
-            'color': '#f97316',
-            'bg': '#7c2d12',
-            'subject_prefix': '🔥 ВЫСОКАЯ НАГРУЗКА CPU',
-            'header': 'ВЫСОКАЯ НАГРУЗКА CPU'
+            'emoji': '🔥', 'color': '#f97316', 'bg': '#7c2d12',
+            'subject_prefix': 'ВЫСОКАЯ НАГРУЗКА CPU', 'header': 'ВЫСОКАЯ НАГРУЗКА CPU'
         }
     if 'архив' in message or 'archive' in message:
         return {
-            'emoji': '💾',
-            'color': '#8b5cf6',
-            'bg': '#4c1d95',
-            'subject_prefix': '💾 ПРОБЛЕМА С АРХИВОМ',
-            'header': 'ПРОБЛЕМА С АРХИВОМ'
+            'emoji': '💾', 'color': '#8b5cf6', 'bg': '#4c1d95',
+            'subject_prefix': 'ПРОБЛЕМА С АРХИВОМ', 'header': 'ПРОБЛЕМА С АРХИВОМ'
         }
     if 'диск' in message or 'disk' in message:
         return {
-            'emoji': '💿',
-            'color': '#ef4444',
-            'bg': '#7f1d1d',
-            'subject_prefix': '💿 ОШИБКА ДИСКОВ',
-            'header': 'ОШИБКА ДИСКОВ'
+            'emoji': '💿', 'color': '#ef4444', 'bg': '#7f1d1d',
+            'subject_prefix': 'ОШИБКА ДИСКОВ', 'header': 'ОШИБКА ДИСКОВ'
         }
     return {
-        'emoji': '⚠️',
-        'color': '#f59e0b',
-        'bg': '#78350f',
-        'subject_prefix': '⚠️ ПРЕДУПРЕЖДЕНИЕ',
-        'header': 'ПРЕДУПРЕЖДЕНИЕ'
+        'emoji': '⚠️', 'color': '#f59e0b', 'bg': '#78350f',
+        'subject_prefix': 'ПРЕДУПРЕЖДЕНИЕ', 'header': 'ПРЕДУПРЕЖДЕНИЕ'
     }
 
 
@@ -632,25 +739,42 @@ def format_alert_email(alert_data, settings):
     timestamp = alert_data.get('ts', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     health = alert_data.get('health', {})
     monitor_url = settings.get('monitor_url', '')
+    downtime = alert_data.get('downtime', '')
 
     cpu_val = health.get('cpu', '?')
     cpu_str = f"{cpu_val:.1f}%" if isinstance(cpu_val, (int, float)) else f"{cpu_val}%"
     arch_val = health.get('arch', '?')
     arch_str = f"{arch_val:.1f} дн" if isinstance(arch_val, (int, float)) else f"{arch_val} дн"
 
+    # Добавление информации о времени простоя
+    downtime_html = ""
+    if downtime:
+        downtime_html = f"""
+              <!-- Время простоя -->
+              <tr>
+                <td style="padding:12px 0;border-bottom:1px solid #21262d;">
+                  <table width="100%" cellpadding="0" cellspacing="0">
+                    <tr>
+                      <td style="color:#8b949e;font-size:13px;width:140px;">⏱ Время простоя</td>
+                      <td style="color:#f0f6fc;font-size:15px;font-weight:bold;">{downtime}</td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>"""
+
     server_link = ""
     if monitor_url and server_id:
         server_link = f"""
-        <tr>
-            <td colspan="2" style="padding: 16px 0 0 0; text-align: center;">
-                <a href="{monitor_url}/server/{server_id}"
-                   style="display: inline-block; background-color: {style['color']};
-                          color: #ffffff; padding: 10px 24px; border-radius: 6px;
-                          text-decoration: none; font-weight: bold;">
+              <tr>
+                <td colspan="2" style="padding: 16px 0 0 0; text-align: center;">
+                  <a href="{monitor_url}/server/{server_id}"
+                     style="display: inline-block; background-color: {style['color']};
+                            color: #ffffff; padding: 10px 24px; border-radius: 6px;
+                            text-decoration: none; font-weight: bold;">
                     🔗 Открыть в TRASSIR Monitor
-                </a>
-            </td>
-        </tr>"""
+                  </a>
+                </td>
+              </tr>"""
 
     subject = f"{style['subject_prefix']} — {server_name}"
 
@@ -738,6 +862,8 @@ def format_alert_email(alert_data, settings):
                   </table>
                 </td>
               </tr>
+
+              {downtime_html}
 
               <!-- Состояние сервера -->
               <tr>
@@ -891,7 +1017,7 @@ def send_email(to_addr, to_name, subject, html_body, settings):
         msg['From'] = f"{from_name} <{from_addr}>"
         msg['To'] = f"{to_name} <{to_addr}>" if to_name else to_addr
         msg['Subject'] = subject
-        msg['X-Mailer'] = 'TRASSIR Monitor v1.0'
+        msg['X-Mailer'] = 'TRASSIR Monitor v1.1'
 
         msg.attach(MIMEText(html_body, 'html', 'utf-8'))
 
@@ -928,7 +1054,7 @@ def send_email(to_addr, to_name, subject, html_body, settings):
 
 def run_bot():
     """Основной бесконечный цикл работы демона"""
-    print(f"[{datetime.now()}] 📧 Mail Bot запускается...")
+    print(f"[{datetime.now()}] 📧 Mail Bot v1.1 запускается...")
     print(f"[{datetime.now()}] 📁 База данных: {DB_PATH}")
     print(f"[{datetime.now()}] ⏱  Интервал проверки: {CHECK_INTERVAL} сек")
 
@@ -991,7 +1117,8 @@ def run_bot():
                         time.sleep(0.2)
 
                 if sent_to:
-                    print(f"[{datetime.now()}] ✅ Отправлено: {alert['msg'][:60]}")
+                    downtime_info = f" | простой: {alert['downtime']}" if alert.get('downtime') else ""
+                    print(f"[{datetime.now()}] ✅ Отправлено: {alert['msg'][:60]}{downtime_info}")
                     print(f"[{datetime.now()}]    Получатели: {', '.join(sent_to)}")
 
             if checks % 360 == 0:
@@ -1499,13 +1626,11 @@ mailRefresh();
 '''
 
 # Ищем блок "Список серверов" и вставляем карточку ПЕРЕД НИМ
-# Это позволит карточке Email быть второй колонкой между "Параметры мониторинга" и "Список серверов"
 search = '    <!-- Список серверов -->'
 if search in content:
     content = content.replace(search, mail_card + '\n    ' + search)
     print("    ✓ Карточка Email добавлена перед 'Список серверов'")
 else:
-    # Альтернативный вариант: ищем закрывающий div первой колонки
     first_col_end = content.find('</div>\n\n    <!-- Список серверов -->')
     if first_col_end != -1:
         content = content[:first_col_end] + mail_card + content[first_col_end:]
@@ -1681,7 +1806,7 @@ echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}║   Mail Notifier — УСТАНОВЛЕН! 🎉             ║${NC}"
-echo -e "${GREEN}║   v1.0 — Email уведомления активны           ║${NC}"
+echo -e "${GREEN}║   v1.1 — Email уведомления + Восстановления   ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -1702,12 +1827,18 @@ echo -e "   Бэкап:       ${CYAN}$BACKUP_DIR${NC}"
 echo ""
 echo -e "${BOLD}📧 Формат уведомлений:${NC}"
 echo -e "   🟢 ВОССТАНОВЛЕНИЕ — канал/сервер вернулся в онлайн"
+echo -e "      + время простоя (сколько был недоступен)"
 echo -e "   📷 ОТВАЛ КАМЕР — с указанием имён"
 echo -e "   🔥 ВЫСОКАЯ НАГРУЗКА CPU"
 echo -e "   💾 ПРОБЛЕМА С АРХИВОМ"
 echo -e "   💿 ОШИБКА ДИСКОВ"
 echo -e "   🔴 КРИТИЧЕСКИЙ АЛЕРТ"
-echo -e "   Красивое HTML-письмо с состоянием сервера"
+echo -e "   Для каждого: CPU%, камеры онлайн, архив, uptime, отклик"
+echo ""
+echo -e "${BOLD}⏱ Расчёт времени простоя:${NC}"
+echo -e "   При восстановлении камеры — ищется момент её отвала"
+echo -e "   При восстановлении сервера — ищется последний offline-алерт"
+echo -e "   Пример в письме: 'Время простоя: 2 ч 15 мин'"
 echo ""
 echo -e "${BOLD}🛡 Защита от спама:${NC}"
 echo -e "   • 1 алерт = 1 письмо"
