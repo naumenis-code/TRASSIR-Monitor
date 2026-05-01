@@ -1,11 +1,12 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor — Telegram Bot Installer v6.0 FINAL
+# TRASSIR Monitor — Telegram Bot Installer v6.1 FIXED
 # ============================================
-# Все надписи на русском языке
-# Чистая замена шаблона settings.html
-# Бот читает из БД, не спамит
-# Редактирование получателей через Web
+# Исправлены:
+#   - SyntaxError: эмодзи в Python коде (heredoc)
+#   - Дублированный мусорный код после format_alert_message
+#   - Расчёт времени простоя камер и серверов
+#   - Отправка уведомлений о восстановлении серверов
 # ============================================
 set -e
 
@@ -31,10 +32,11 @@ clear
 
 echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                              ║${NC}"
-echo -e "${CYAN}║   TRASSIR Monitor — Telegram Bot v6.0 FINAL  ║${NC}"
+echo -e "${CYAN}║   TRASSIR Monitor — Telegram Bot v6.1        ║${NC}"
 echo -e "${CYAN}║   Автономный демон + Web-управление          ║${NC}"
 echo -e "${CYAN}║   HTTP-прокси • Много получателей            ║${NC}"
-echo -e "${CYAN}║   Debian 11/12/13                            ║${NC}"
+echo -e "${CYAN}║   Восстановление каналов и серверов          ║${NC}"
+echo -e "${CYAN}║   Учёт времени простоя                       ║${NC}"
 echo -e "${CYAN}║   Русский язык                               ║${NC}"
 echo -e "${CYAN}║                                              ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
@@ -48,22 +50,22 @@ echo -e "${YELLOW}Проверка системы...${NC}"
 echo ""
 
 if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}❌ Запустите с правами root:${NC}"
-    echo -e "   ${YELLOW}sudo bash install-telegram-bot-final.sh${NC}"
+    echo -e "${RED}Запустите с правами root:${NC}"
+    echo -e "   ${YELLOW}sudo bash install-telegram-notifier.sh${NC}"
     exit 1
 fi
 echo -e "  ${GREEN}✓${NC} Права root"
 
 if [ ! -f "$APP_PY" ]; then
-    echo -e "${RED}❌ TRASSIR Monitor не найден в $INSTALL_DIR${NC}"
+    echo -e "${RED}TRASSIR Monitor не найден в $INSTALL_DIR${NC}"
     echo -e "   Сначала установите TRASSIR Monitor:"
-    echo -e "   ${YELLOW}sudo bash install-trassir-monitor16.sh${NC}"
+    echo -e "   ${YELLOW}sudo bash install-trassir-monitor.sh${NC}"
     exit 1
 fi
 echo -e "  ${GREEN}✓${NC} TRASSIR Monitor найден"
 
 if [ ! -f "$VENV_PYTHON" ]; then
-    echo -e "${RED}❌ Виртуальное окружение Python не найдено${NC}"
+    echo -e "${RED}Виртуальное окружение Python не найдено${NC}"
     echo -e "   Путь: $VENV_PYTHON"
     exit 1
 fi
@@ -71,7 +73,7 @@ echo -e "  ${GREEN}✓${NC} Виртуальное окружение Python"
 
 if systemctl is-active --quiet "$SERVICE_BOT" 2>/dev/null; then
     echo ""
-    echo -e "${YELLOW}⚠ Telegram Bot уже установлен и запущен.${NC}"
+    echo -e "${YELLOW}Telegram Bot уже установлен и запущен.${NC}"
     echo -e "  Будет выполнена переустановка с сохранением базы данных."
     echo -e "  Сервис: ${BOLD}$SERVICE_BOT${NC}"
     echo ""
@@ -105,14 +107,14 @@ echo ""
 read -p "     Токен: " TG_TOKEN
 
 while [ -z "$TG_TOKEN" ]; do
-    echo -e "     ${RED}⚠ Токен обязателен для работы бота!${NC}"
+    echo -e "     ${RED}Токен обязателен для работы бота!${NC}"
     read -p "     Токен: " TG_TOKEN
 done
 
 if echo "$TG_TOKEN" | grep -qE '^[0-9]+:[a-zA-Z0-9_-]+$'; then
     echo -e "     ${GREEN}✓${NC} Формат токена корректен"
 else
-    echo -e "     ${YELLOW}⚠${NC} Нестандартный формат токена. Продолжаем."
+    echo -e "     ${YELLOW}Нестандартный формат токена. Продолжаем.${NC}"
 fi
 echo ""
 
@@ -124,7 +126,7 @@ echo ""
 read -p "     Chat IDs: " TG_CHATS
 
 while [ -z "$TG_CHATS" ]; do
-    echo -e "     ${RED}⚠ Хотя бы один Chat ID обязателен!${NC}"
+    echo -e "     ${RED}Хотя бы один Chat ID обязателен!${NC}"
     read -p "     Chat IDs: " TG_CHATS
 done
 
@@ -140,7 +142,7 @@ echo ""
 read -p "     Прокси (Enter — без прокси): " TG_PROXY
 
 if [ -n "$TG_PROXY" ]; then
-    MASKED_PROXY=$(echo "$TG_PROXY" | sed -E 's/(:\/\/[^:]+:)([^@]+)(@)/\1***\3/')
+    MASKED_PROXY=$(echo "$TG_PROXY" | sed -E 's|(:\/\/[^:]+:)([^@]+)(@)|\1***\3|')
     echo -e "     ${GREEN}✓${NC} Прокси настроен: $MASKED_PROXY"
 else
     echo -e "     ${GREEN}✓${NC} Прямое подключение к api.telegram.org"
@@ -155,7 +157,7 @@ read -p "     Интервал (Enter для 10): " CHECK_INTERVAL
 CHECK_INTERVAL=${CHECK_INTERVAL:-10}
 
 if ! [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [ "$CHECK_INTERVAL" -lt 5 ]; then
-    echo -e "     ${YELLOW}⚠${NC} Интервал должен быть не менее 5 секунд"
+    echo -e "     ${YELLOW}Интервал должен быть не менее 5 секунд${NC}"
     echo -e "     Установлено значение по умолчанию: 10 секунд"
     CHECK_INTERVAL=10
 fi
@@ -180,17 +182,17 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║        ПАРАМЕТРЫ УСТАНОВКИ               ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  🔑 Токен:      ${BOLD}${TG_TOKEN:0:12}...${TG_TOKEN: -4}${NC}"
-echo -e "  👥 Чаты:       ${BOLD}${TG_CHATS}${NC} ($CHAT_COUNT шт.)"
+echo -e "  Токен:      ${BOLD}${TG_TOKEN:0:12}...${TG_TOKEN: -4}${NC}"
+echo -e "  Чаты:       ${BOLD}${TG_CHATS}${NC} ($CHAT_COUNT шт.)"
 if [ -n "$TG_PROXY" ]; then
-    echo -e "  🌐 Прокси:     ${BOLD}$MASKED_PROXY${NC}"
+    echo -e "  Прокси:     ${BOLD}$MASKED_PROXY${NC}"
 else
-    echo -e "  🌐 Прокси:     ${BOLD}не используется${NC}"
+    echo -e "  Прокси:     ${BOLD}не используется${NC}"
 fi
-echo -e "  ⏱  Интервал:   ${BOLD}${CHECK_INTERVAL} сек${NC}"
-echo -e "  🔗 URL:        ${BOLD}${MONITOR_URL}${NC}"
-echo -e "  📁 Установка:  ${BOLD}${INSTALL_DIR}${NC}"
-echo -e "  💾 Бэкап:      ${BOLD}${BACKUP_DIR}${NC}"
+echo -e "  Интервал:   ${BOLD}${CHECK_INTERVAL} сек${NC}"
+echo -e "  URL:        ${BOLD}${MONITOR_URL}${NC}"
+echo -e "  Установка:  ${BOLD}${INSTALL_DIR}${NC}"
+echo -e "  Бэкап:      ${BOLD}${BACKUP_DIR}${NC}"
 echo ""
 
 read -p "Всё верно? Нажмите Enter для продолжения (Ctrl+C для отмены): " confirm
@@ -213,25 +215,25 @@ if [ -f "$APP_PY" ]; then
     cp "$APP_PY" "$BACKUP_DIR/app.py.bak"
     echo -e "  ${GREEN}✓${NC} app.py сохранён ($(wc -c < "$BACKUP_DIR/app.py.bak") байт)"
 else
-    echo -e "  ${YELLOW}⚠${NC} app.py не найден (пропускаем)"
+    echo -e "  ${YELLOW}${NC} app.py не найден (пропускаем)"
 fi
 
 if [ -f "$SETTINGS_HTML" ]; then
     cp "$SETTINGS_HTML" "$BACKUP_DIR/settings.html.bak"
     echo -e "  ${GREEN}✓${NC} settings.html сохранён ($(wc -c < "$BACKUP_DIR/settings.html.bak") байт)"
 else
-    echo -e "  ${YELLOW}⚠${NC} settings.html не найден (пропускаем)"
+    echo -e "  ${YELLOW}${NC} settings.html не найден (пропускаем)"
 fi
 
 if [ -f "$CONFIG_FILE" ]; then
     cp "$CONFIG_FILE" "$BACKUP_DIR/config.ini.bak"
     echo -e "  ${GREEN}✓${NC} config.ini сохранён"
 else
-    echo -e "  ${YELLOW}⚠${NC} config.ini не найден (создадим новый)"
+    echo -e "  ${YELLOW}${NC} config.ini не найден (создадим новый)"
 fi
 
 echo ""
-echo -e "${GREEN}✅ Бэкап создан успешно${NC}"
+echo -e "${GREEN}Бэкап создан успешно${NC}"
 echo ""
 
 # ============================================
@@ -267,7 +269,7 @@ echo "  monitor_url = $MONITOR_URL"
 echo "  ----------------------------------------"
 
 echo ""
-echo -e "${GREEN}✅ Конфигурация сохранена${NC}"
+echo -e "${GREEN}Конфигурация сохранена${NC}"
 echo ""
 
 # ============================================
@@ -294,7 +296,7 @@ conn = sqlite3.connect(DB_PATH)
 conn.execute("PRAGMA journal_mode=WAL")
 conn.execute("PRAGMA busy_timeout=5000")
 conn.row_factory = sqlite3.Row
-print("    ✓ Подключено (WAL режим)")
+print("    OK Подключено (WAL режим)")
 
 print("")
 print("  • Создание таблиц Telegram:")
@@ -311,7 +313,7 @@ conn.execute("""
         added_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
 """)
-print("    ✓ telegram_chats (получатели)")
+print("    OK telegram_chats (получатели)")
 
 conn.execute("""
     CREATE TABLE IF NOT EXISTS telegram_settings (
@@ -319,7 +321,7 @@ conn.execute("""
         value TEXT
     )
 """)
-print("    ✓ telegram_settings (настройки)")
+print("    OK telegram_settings (настройки)")
 
 conn.execute("""
     CREATE TABLE IF NOT EXISTS telegram_logs (
@@ -330,15 +332,15 @@ conn.execute("""
         message TEXT
     )
 """)
-print("    ✓ telegram_logs (история отправок)")
+print("    OK telegram_logs (история отправок)")
 
 conn.execute("CREATE INDEX IF NOT EXISTS idx_tg_logs_key ON telegram_logs(alert_key, ts)")
 conn.execute("CREATE INDEX IF NOT EXISTS idx_tg_chats_enabled ON telegram_chats(enabled)")
-print("    ✓ Индексы созданы")
+print("    OK Индексы созданы")
 
 conn.execute("INSERT OR IGNORE INTO telegram_settings (key, value) VALUES ('enabled', '1')")
 conn.execute("INSERT OR IGNORE INTO telegram_settings (key, value) VALUES ('notify_interval', '0')")
-print("    ✓ Настройки по умолчанию")
+print("    OK Настройки по умолчанию")
 
 print("")
 print("  • Добавление получателей:")
@@ -353,10 +355,10 @@ for chat_id in chat_list:
                 "INSERT OR IGNORE INTO telegram_chats (chat_id) VALUES (?)",
                 (chat_id,)
             )
-            print(f"    ✓ Chat ID {chat_id} добавлен")
+            print(f"    OK Chat ID {chat_id} добавлен")
             added_count += 1
         except Exception as e:
-            print(f"    ⚠ Ошибка добавления {chat_id}: {e}")
+            print(f"    WARN Ошибка добавления {chat_id}: {e}")
 
 total_chats = conn.execute("SELECT COUNT(*) FROM telegram_chats").fetchone()[0]
 enabled_chats = conn.execute("SELECT COUNT(*) FROM telegram_chats WHERE enabled=1").fetchone()[0]
@@ -365,13 +367,13 @@ print(f"    Всего получателей: {total_chats} (активных: 
 conn.commit()
 conn.close()
 print("")
-print("  ✅ База данных готова к работе")
+print("  OK База данных готова к работе")
 PYEOF
 
 deactivate
 
 echo ""
-echo -e "${GREEN}✅ База данных инициализирована${NC}"
+echo -e "${GREEN}База данных инициализирована${NC}"
 echo ""
 
 # ============================================
@@ -385,34 +387,40 @@ echo ""
 
 echo "  • Генерация tg_bot.py..."
 
+# ВАЖНО: весь Python-код пишется через cat без heredoc-конфликтов.
+# Эмодзи внутри Python строк — допустимо, проблема была в том, что
+# эмодзи оказывались ВНЕ строк (мусорный код после тройных кавычек).
+
 cat > "$TGBOT_PY" << 'TGBOTEOF'
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-TRASSIR Monitor — Telegram Bot Daemon v6.0
+TRASSIR Monitor -- Telegram Bot Daemon v6.1 FIXED
 Автономный мониторинг базы данных и отправка уведомлений в Telegram
 
 Принцип работы:
 1. Проверяет таблицу alerts каждые N секунд
 2. Находит новые алерты (отсутствующие в telegram_logs)
-3. Форматирует красивое HTML-сообщение на русском языке
+3. Форматирует HTML-сообщение на русском языке
 4. Отправляет всем подписанным получателям
 5. Помечает алерт как отправленный
 
-Особенности:
-- Не зависит от основного цикла опроса серверов
-- Поддержка HTTP/HTTPS прокси
-- Защита от повторной отправки
-- Детальное логирование
-- Автоматическая очистка старых логов
+Исправления v6.1:
+- Убран дублированный код после format_alert_message (был SyntaxError)
+- Добавлен расчёт времени простоя для серверов
+- Улучшена логика поиска offline-события для расчёта downtime
+- Восстановления серверов теперь тоже отправляются
 """
 
 import os
+import re
 import sys
 import time
 import sqlite3
 import requests
 import configparser
-from datetime import datetime
+import traceback
+from datetime import datetime, timedelta
 
 # ============================================
 # КОНФИГУРАЦИЯ
@@ -421,52 +429,35 @@ from datetime import datetime
 BASE_DIR = "/opt/trassir-monitor"
 CONFIG_FILE = os.path.join(BASE_DIR, "config.ini")
 DB_PATH = os.path.join(BASE_DIR, "data", "trassir.db")
-CHECK_INTERVAL = 10
+CHECK_INTERVAL = 10  # заменяется sed при установке
 
 # ============================================
 # РАБОТА С КОНФИГУРАЦИОННЫМ ФАЙЛОМ
 # ============================================
 
 def get_config():
-    """
-    Читает конфигурацию из config.ini
-    
-    Возвращает:
-        dict с ключами token, proxy, monitor_url или None
-    """
+    """Читает конфигурацию из config.ini."""
     try:
         cfg = configparser.ConfigParser()
         cfg.read(CONFIG_FILE)
-        
         if 'telegram' not in cfg:
             return None
-        
         return {
             'token': cfg['telegram'].get('token', ''),
             'proxy': cfg['telegram'].get('proxy', ''),
             'monitor_url': cfg['telegram'].get('monitor_url', '')
         }
     except Exception as e:
-        print(f"[{datetime.now()}] Ошибка чтения конфигурации: {e}")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO чтение конфигурации: {e}")
         return None
 
 
 def get_proxies():
-    """
-    Формирует словарь прокси для requests
-    
-    Возвращает:
-        dict с http и https прокси или пустой dict
-    """
+    """Формирует словарь прокси для requests."""
     cfg = get_config()
     if not cfg or not cfg['proxy']:
         return {}
-    
-    proxy_url = cfg['proxy']
-    return {
-        'http': proxy_url,
-        'https': proxy_url
-    }
+    return {'http': cfg['proxy'], 'https': cfg['proxy']}
 
 
 # ============================================
@@ -475,67 +466,46 @@ def get_proxies():
 
 def send_telegram_message(chat_id, text):
     """
-    Отправляет сообщение в Telegram через Bot API
-    
-    Аргументы:
-        chat_id: ID чата получателя
-        text: текст сообщения в формате HTML
-    
-    Возвращает:
-        bool: True если отправка успешна
+    Отправляет HTML-сообщение в Telegram.
+    Возвращает True если успешно.
     """
     cfg = get_config()
-    
     if not cfg or not cfg['token']:
-        print(f"[{datetime.now()}] ❌ Ошибка: токен не настроен")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO токен не настроен")
         return False
-    
     if not chat_id:
-        print(f"[{datetime.now()}] ❌ Ошибка: не указан chat_id")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO не указан chat_id")
         return False
-    
+
     try:
         url = f"https://api.telegram.org/bot{cfg['token']}/sendMessage"
-        
         payload = {
             'chat_id': chat_id,
             'text': text,
             'parse_mode': 'HTML',
             'disable_web_page_preview': True
         }
-        
-        proxies = get_proxies()
-        
-        response = requests.post(
-            url,
-            json=payload,
-            proxies=proxies,
-            timeout=15
-        )
-        
+        response = requests.post(url, json=payload, proxies=get_proxies(), timeout=15)
         if response.status_code == 200:
             result = response.json()
             if result.get('ok'):
                 return True
-            else:
-                error_desc = result.get('description', 'Неизвестная ошибка')
-                print(f"[{datetime.now()}] ❌ Ошибка Telegram API: {error_desc}")
-                return False
-        else:
-            print(f"[{datetime.now()}] ❌ Ошибка HTTP: {response.status_code}")
+            err = result.get('description', 'Неизвестная ошибка')
+            print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO Telegram API: {err}")
             return False
-    
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO HTTP {response.status_code}")
+        return False
     except requests.exceptions.Timeout:
-        print(f"[{datetime.now()}] ❌ Таймаут подключения к Telegram")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO таймаут подключения к Telegram")
         return False
     except requests.exceptions.ProxyError as e:
-        print(f"[{datetime.now()}] ❌ Ошибка прокси: {e}")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO прокси: {e}")
         return False
     except requests.exceptions.ConnectionError:
-        print(f"[{datetime.now()}] ❌ Ошибка соединения. Проверьте интернет/прокси")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO ошибка соединения")
         return False
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Неизвестная ошибка: {e}")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO неизвестная ошибка отправки: {e}")
         return False
 
 
@@ -544,128 +514,180 @@ def send_telegram_message(chat_id, text):
 # ============================================
 
 def format_uptime(seconds):
-    """
-    Форматирует uptime из секунд в читаемый вид
-    
-    Аргументы:
-        seconds: количество секунд
-    
-    Возвращает:
-        строка вида "5д 12ч 30м"
-    """
+    """Форматирует uptime из секунд в читаемый вид."""
     if not seconds:
-        return "Н/Д"
-    
+        return "N/D"
     try:
         seconds = int(seconds)
     except (ValueError, TypeError):
         return str(seconds)
-    
     days = seconds // 86400
     hours = (seconds % 86400) // 3600
     minutes = (seconds % 3600) // 60
-    
     if days > 0:
-        return f"{days}д {hours}ч {minutes}м"
+        return f"{days}d {hours}h {minutes}m"
     elif hours > 0:
-        return f"{hours}ч {minutes}м"
+        return f"{hours}h {minutes}m"
     else:
-        return f"{minutes}м"
+        return f"{minutes}m"
+
+
+def format_downtime(seconds):
+    """Форматирует время простоя в читаемый вид."""
+    if not seconds or seconds <= 0:
+        return ""
+    try:
+        seconds = int(seconds)
+    except (ValueError, TypeError):
+        return ""
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    if days > 0:
+        return f"{days} дн {hours} ч {minutes} мин"
+    elif hours > 0:
+        return f"{hours} ч {minutes} мин"
+    elif minutes > 0:
+        return f"{minutes} мин {secs} сек"
+    else:
+        return f"{secs} сек"
+
+
+def classify_alert(level, message):
+    """
+    Определяет тип алерта и возвращает (emoji, header, is_recovery).
+    is_recovery=True если событие — восстановление.
+    """
+    msg_lower = message.lower()
+
+    # Восстановления (приоритет)
+    if any(kw in msg_lower for kw in ['восстановлен', 'restored', 'back online', 'вернулся']):
+        if 'канал' in msg_lower or 'channel' in msg_lower or 'камер' in msg_lower:
+            return 'OK', 'ВОССТАНОВЛЕНИЕ КАМЕР', True
+        if 'сервер' in msg_lower or 'server' in msg_lower:
+            return 'OK', 'СЕРВЕР ВОССТАНОВЛЕН', True
+        return 'OK', 'ВОССТАНОВЛЕНИЕ', True
+
+    if level == 'info' and any(kw in msg_lower for kw in ['ok', 'норма', 'онлайн']):
+        return 'OK', 'ВОССТАНОВЛЕНИЕ', True
+
+    # Критические
+    if level == 'critical':
+        return 'CRIT', 'КРИТИЧЕСКИЙ АЛЕРТ', False
+
+    # Предупреждения по типу
+    if 'камер' in msg_lower or 'camera' in msg_lower or 'канал' in msg_lower or 'channel' in msg_lower:
+        return 'WARN_CAM', 'ОТВАЛ КАМЕР', False
+    if 'cpu' in msg_lower or 'процессор' in msg_lower:
+        return 'WARN_CPU', 'ВЫСОКАЯ НАГРУЗКА CPU', False
+    if 'архив' in msg_lower or 'archive' in msg_lower:
+        return 'WARN_ARCH', 'ПРОБЛЕМА С АРХИВОМ', False
+    if 'диск' in msg_lower or 'disk' in msg_lower:
+        return 'WARN_DISK', 'ОШИБКА ДИСКОВ', False
+
+    return 'WARN', 'ПРЕДУПРЕЖДЕНИЕ', False
+
+
+EMOJI_MAP = {
+    'OK':        'v',       # восстановление
+    'CRIT':      'XX',      # критическое
+    'WARN_CAM':  'CAM',     # камеры
+    'WARN_CPU':  'CPU',     # cpu
+    'WARN_ARCH': 'ARC',     # архив
+    'WARN_DISK': 'DSK',     # диск
+    'WARN':      'WRN',     # прочее
+}
+
+# Используем ASCII-заглушки в тексте формата — эмодзи подставляются
+# только в строки, которые не проходят через Python AST-парсинг heredoc.
+# При отправке реальные эмодзи передаются как обычные Unicode-строки.
+EMOJI_REAL = {
+    'OK':        '\u2705',   # ✅
+    'CRIT':      '\U0001f534',  # 🔴
+    'WARN_CAM':  '\U0001f4f7',  # 📷
+    'WARN_CPU':  '\U0001f525',  # 🔥
+    'WARN_ARCH': '\U0001f4be',  # 💾
+    'WARN_DISK': '\U0001f4bf',  # 💿
+    'WARN':      '\U0001f7e1',  # 🟡
+}
+
+ICON_SERVER  = '\U0001f5a5'   # 🖥
+ICON_IP      = '\U0001f4cd'   # 📍
+ICON_EVENT   = '\u26a0'       # ⚠
+ICON_TIME    = '\u23f1'       # ⏱
+ICON_STATS   = '\U0001f4ca'   # 📊
+ICON_CLOCK   = '\U0001f550'   # 🕐
+ICON_LINK    = '\U0001f517'   # 🔗
 
 
 def format_alert_message(alert_data):
     """
-    Форматирует алерт в красивое HTML-сообщение для Telegram
-    
-    Аргументы:
-        alert_data: словарь с данными алерта и сервера
-    
-    Возвращает:
-        строка с HTML-форматированием на русском языке
+    Форматирует алерт в HTML-сообщение для Telegram.
+    Все эмодзи задаются через Unicode escape — нет проблем с парсером.
     """
-    level = alert_data.get('level', 'warning')
-    message = alert_data.get('msg', 'Неизвестная проблема')
+    level      = alert_data.get('level', 'warning')
+    message    = alert_data.get('msg', 'Неизвестная проблема')
     server_name = alert_data.get('server_name', 'Неизвестный сервер')
-    server_ip = alert_data.get('server_ip', 'Неизвестный IP')
-    server_id = alert_data.get('server_id', '')
-    timestamp = alert_data.get('ts', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    health = alert_data.get('health', {})
-    
-    msg_lower = message.lower()
-    
-    if level == 'critical':
-        emoji = '🔴'
-        header = '🚨 КРИТИЧЕСКИЙ АЛЕРТ'
-    elif 'камер' in msg_lower or 'camera' in msg_lower:
-        emoji = '📷'
-        header = 'ОТВАЛ КАМЕР'
-    elif 'cpu' in msg_lower or 'процессор' in msg_lower:
-        emoji = '🔥'
-        header = 'ВЫСОКАЯ НАГРУЗКА CPU'
-    elif 'архив' in msg_lower or 'archive' in msg_lower:
-        emoji = '💾'
-        header = 'ПРОБЛЕМА С АРХИВОМ'
-    elif 'диск' in msg_lower or 'disk' in msg_lower:
-        emoji = '💿'
-        header = 'ОШИБКА ДИСКОВ'
-    else:
-        emoji = '🟡'
-        header = 'ПРЕДУПРЕЖДЕНИЕ'
-    
+    server_ip  = alert_data.get('server_ip', 'Неизвестный IP')
+    server_id  = alert_data.get('server_id', '')
+    timestamp  = alert_data.get('ts', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    health     = alert_data.get('health', {})
+    downtime   = alert_data.get('downtime', '')
+
+    kind, header, is_recovery = classify_alert(level, message)
+    emoji = EMOJI_REAL.get(kind, '\u2757')
+
     cfg = get_config()
     monitor_url = cfg.get('monitor_url', '') if cfg else ''
-    
+
     cpu_val = health.get('cpu', '?')
     cpu_str = f"{cpu_val:.1f}%" if isinstance(cpu_val, (int, float)) else f"{cpu_val}%"
-    
+
     arch_val = health.get('arch', '?')
     arch_str = f"{arch_val:.1f} дн" if isinstance(arch_val, (int, float)) else f"{arch_val} дн"
-    
-    text = f"""{emoji} <b>{header}</b>
 
-🖥 <b>Сервер:</b> {server_name}
-📍 <b>IP адрес:</b> {server_ip}
+    lines = [
+        f"{emoji} <b>{header}</b>",
+        "",
+        f"{ICON_SERVER} <b>Сервер:</b> {server_name}",
+        f"{ICON_IP} <b>IP адрес:</b> {server_ip}",
+        "",
+        f"{ICON_EVENT} <b>Событие:</b> {message}",
+    ]
 
-⚠ <b>Проблема:</b> {message}
+    if downtime:
+        lines.append(f"{ICON_TIME} <b>Время простоя:</b> {downtime}")
 
-📊 <b>Текущее состояние сервера:</b>
-  • Загрузка процессора: <b>{cpu_str}</b>
-  • Камер онлайн: <b>{health.get('ch_online', '?')} из {health.get('ch_total', '?')}</b>
-  • Глубина архива: <b>{arch_str}</b>
-  • Время работы (uptime): <b>{format_uptime(health.get('uptime', 0))}</b>
-  • Время отклика: <b>{health.get('rt', '?')} мс</b>
+    lines += [
+        "",
+        f"{ICON_STATS} <b>Текущее состояние сервера:</b>",
+        f"  \u2022 Загрузка процессора: <b>{cpu_str}</b>",
+        f"  \u2022 Камер онлайн: <b>{health.get('ch_online', '?')} из {health.get('ch_total', '?')}</b>",
+        f"  \u2022 Глубина архива: <b>{arch_str}</b>",
+        f"  \u2022 Аптайм сервера: <b>{format_uptime(health.get('uptime', 0))}</b>",
+        f"  \u2022 Время отклика: <b>{health.get('rt', '?')} мс</b>",
+        "",
+        f"{ICON_CLOCK} {timestamp} МСК",
+    ]
 
-🕐 {timestamp} МСК"""
-    
     if monitor_url and server_id:
-        text += f"\n\n🔗 <a href='{monitor_url}/server/{server_id}'>Открыть в TRASSIR Monitor</a>"
-    
-    return text
+        lines.append(f"\n{ICON_LINK} <a href='{monitor_url}/server/{server_id}'>Открыть в TRASSIR Monitor</a>")
+
+    return "\n".join(lines)
 
 
 def format_test_message(monitor_url=""):
-    """
-    Форматирует тестовое сообщение
-    
-    Аргументы:
-        monitor_url: URL веб-интерфейса
-    
-    Возвращает:
-        строка с HTML-форматированием
-    """
+    """Форматирует тестовое сообщение."""
     ts = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-    
-    text = f"""✅ <b>TRASSIR Monitor — Бот установлен!</b>
-
-🖥 <b>Система мониторинга активна</b>
-📍 <b>Веб-интерфейс:</b> {monitor_url or 'не указан'}
-
-✅ Все системы работают корректно
-📡 Telegram-уведомления успешно настроены
-
-⏰ {ts} МСК"""
-    
-    return text
+    return (
+        f"\u2705 <b>TRASSIR Monitor \u2014 Бот установлен!</b>\n\n"
+        f"\U0001f5a5 <b>Система мониторинга активна</b>\n"
+        f"\U0001f4cd <b>Веб-интерфейс:</b> {monitor_url or 'не указан'}\n\n"
+        f"\u2705 Все системы работают корректно\n"
+        f"\U0001f4e1 Telegram-уведомления успешно настроены\n\n"
+        f"\u23f0 {ts} МСК"
+    )
 
 
 # ============================================
@@ -673,9 +695,7 @@ def format_test_message(monitor_url=""):
 # ============================================
 
 def get_database_connection():
-    """
-    Создаёт и возвращает подключение к БД с правильными настройками
-    """
+    """Создаёт подключение к БД с правильными настройками."""
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
@@ -683,71 +703,178 @@ def get_database_connection():
     return conn
 
 
+def calc_downtime_for_alert(conn, alert):
+    """
+    Вычисляет время простоя для алерта о восстановлении.
+
+    Алгоритм:
+      1. Если в сообщении есть имя канала (#N Имя) — ищем последний
+         алерт об отвале ИМЕННО этого канала до момента восстановления.
+      2. Если восстановление сервера — ищем алерт "сервер недоступен"
+         или событие offline для этого server_id.
+      3. Возвращает отформатированную строку или '' если не найдено.
+    """
+    msg = alert['msg']
+    server_id = alert['server_id']
+    recovery_ts_str = alert['ts']
+
+    try:
+        recovery_dt = datetime.strptime(recovery_ts_str, '%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return ''
+
+    # --- Попытка 1: восстановление канала (камеры) ---
+    channel_match = re.search(r'#\d+\s+[^\,\]\n]+', msg)
+    if channel_match:
+        channel_name = channel_match.group(0).strip()
+        try:
+            offline_row = conn.execute(
+                """SELECT ts FROM alerts
+                   WHERE server_id = ?
+                     AND (msg LIKE '%' || ? || '%' OR msg LIKE 'Камер офлайн%')
+                     AND ts < ?
+                   ORDER BY ts DESC LIMIT 1""",
+                (server_id, channel_name, recovery_ts_str)
+            ).fetchone()
+            if offline_row:
+                offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
+                delta = int((recovery_dt - offline_dt).total_seconds())
+                return format_downtime(delta)
+        except Exception:
+            pass
+
+    # --- Попытка 2: восстановление сервера ---
+    msg_lower = msg.lower()
+    if 'сервер' in msg_lower or 'server' in msg_lower:
+        try:
+            offline_row = conn.execute(
+                """SELECT ts FROM alerts
+                   WHERE server_id = ?
+                     AND (
+                           msg LIKE '%недоступ%'
+                        OR msg LIKE '%offline%'
+                        OR msg LIKE '%не отвечает%'
+                        OR msg LIKE '%потеря связи%'
+                        OR level = 'critical'
+                     )
+                     AND ts < ?
+                   ORDER BY ts DESC LIMIT 1""",
+                (server_id, recovery_ts_str)
+            ).fetchone()
+            if offline_row:
+                offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
+                delta = int((recovery_dt - offline_dt).total_seconds())
+                return format_downtime(delta)
+        except Exception:
+            pass
+
+    # --- Попытка 3: по таблице health — последний момент когда сервер пропадал ---
+    try:
+        # Ищем момент до recovery когда rt был NULL или очень большой (сервер был недоступен)
+        offline_health = conn.execute(
+            """SELECT ts FROM health
+               WHERE server_id = ?
+                 AND (rt IS NULL OR rt > 9000)
+                 AND ts < ?
+               ORDER BY ts DESC LIMIT 1""",
+            (server_id, recovery_ts_str)
+        ).fetchone()
+        if offline_health:
+            offline_dt = datetime.strptime(offline_health['ts'], '%Y-%m-%d %H:%M:%S')
+            delta = int((recovery_dt - offline_dt).total_seconds())
+            if delta > 0:
+                return format_downtime(delta)
+    except Exception:
+        pass
+
+    return ''
+
+
+def already_sent(conn, alert_id):
+    """Проверяет был ли алерт уже отправлен хоть одному получателю."""
+    row = conn.execute(
+        "SELECT id FROM telegram_logs WHERE alert_key = ? LIMIT 1",
+        (str(alert_id),)
+    ).fetchone()
+    return row is not None
+
+
+def get_health_for_server(conn, server_id):
+    """Получает последние данные о здоровье сервера."""
+    row = conn.execute(
+        """SELECT cpu, disks, ch_total, ch_online, arch, uptime, rt
+           FROM health
+           WHERE server_id = ?
+           ORDER BY ts DESC LIMIT 1""",
+        (server_id,)
+    ).fetchone()
+    if row:
+        return dict(row)
+    return {'cpu': '?', 'ch_online': '?', 'ch_total': '?', 'arch': '?', 'uptime': 0, 'rt': '?'}
+
+
 def get_new_alerts():
     """
-    Получает список НОВЫХ алертов (ещё не отправленных в Telegram)
-    
-    Возвращает:
-        list[dict]: список алертов с полной информацией
+    Получает список новых алертов (ещё не отправленных).
+
+    Включает:
+      - Обычные алерты (ack=0, warning/critical)
+      - Восстановления каналов и серверов (level=info, msg содержит 'восстановлен')
     """
     conn = get_database_connection()
-    
     try:
-        query = """
-            SELECT 
-                a.id,
-                a.server_id,
-                a.level,
-                a.msg,
-                a.ts,
-                a.ack,
-                s.name as server_name,
-                s.ip as server_ip
-            FROM alerts a
-            JOIN servers s ON a.server_id = s.id
-            WHERE a.ack = 0
-            AND a.id NOT IN (
-                SELECT DISTINCT CAST(alert_key AS INTEGER) 
-                FROM telegram_logs 
-                WHERE alert_key GLOB '[0-9]*'
-            )
-            ORDER BY a.ts ASC
-        """
-        
-        alerts = conn.execute(query).fetchall()
-        
+        # --- Обычные алерты ---
+        alerts_rows = conn.execute(
+            """SELECT
+                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
+                   s.name as server_name, s.ip as server_ip
+               FROM alerts a
+               JOIN servers s ON a.server_id = s.id
+               WHERE a.ack = 0
+                 AND a.level IN ('warning', 'critical')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM telegram_logs tl
+                     WHERE tl.alert_key = CAST(a.id AS TEXT)
+                 )
+               ORDER BY a.ts ASC"""
+        ).fetchall()
+
+        # --- Восстановления (info + ключевые слова) ---
+        recovery_rows = conn.execute(
+            """SELECT
+                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
+                   s.name as server_name, s.ip as server_ip
+               FROM alerts a
+               JOIN servers s ON a.server_id = s.id
+               WHERE a.level = 'info'
+                 AND (
+                       a.msg LIKE '%восстановлен%'
+                    OR a.msg LIKE '%restored%'
+                    OR a.msg LIKE '%back online%'
+                    OR a.msg LIKE '%вернулся%'
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM telegram_logs tl
+                     WHERE tl.alert_key = CAST(a.id AS TEXT)
+                 )
+               ORDER BY a.ts ASC"""
+        ).fetchall()
+
         result = []
-        for alert in alerts:
-            alert_dict = dict(alert)
-            
-            health_row = conn.execute(
-                """SELECT cpu, disks, ch_total, ch_online, arch, uptime, rt 
-                   FROM health 
-                   WHERE server_id = ? 
-                   ORDER BY ts DESC 
-                   LIMIT 1""",
-                (alert['server_id'],)
-            ).fetchone()
-            
-            if health_row:
-                alert_dict['health'] = dict(health_row)
+        for row in list(alerts_rows) + list(recovery_rows):
+            d = dict(row)
+            d['health'] = get_health_for_server(conn, d['server_id'])
+            # Для восстановлений считаем время простоя
+            if d['level'] == 'info' or 'восстановлен' in d['msg'].lower():
+                d['downtime'] = calc_downtime_for_alert(conn, d)
             else:
-                alert_dict['health'] = {
-                    'cpu': '?',
-                    'ch_online': '?',
-                    'ch_total': '?',
-                    'arch': '?',
-                    'uptime': 0,
-                    'rt': '?'
-                }
-            
-            result.append(alert_dict)
-        
+                d['downtime'] = ''
+            result.append(d)
+
         return result
-    
+
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка получения алертов: {e}")
-        import traceback
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO получение алертов: {e}")
         traceback.print_exc()
         return []
     finally:
@@ -755,64 +882,41 @@ def get_new_alerts():
 
 
 def mark_alert_as_sent(alert_id, chat_id):
-    """
-    Помечает алерт как отправленный в telegram_logs
-    
-    Аргументы:
-        alert_id: ID алерта из таблицы alerts
-        chat_id: ID чата куда отправлено
-    """
+    """Помечает алерт как отправленный."""
     conn = get_database_connection()
-    
     try:
         conn.execute(
-            """INSERT OR IGNORE INTO telegram_logs (ts, alert_key, chat_id) 
+            """INSERT OR IGNORE INTO telegram_logs (ts, alert_key, chat_id)
                VALUES (datetime('now', '+3 hours'), ?, ?)""",
             (str(alert_id), str(chat_id))
         )
         conn.commit()
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка маркировки алерта: {e}")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO маркировка алерта: {e}")
     finally:
         conn.close()
 
 
 def get_enabled_chats():
-    """
-    Получает список всех активных получателей
-    
-    Возвращает:
-        list[dict]: список чатов с настройками
-    """
+    """Получает список активных получателей."""
     conn = get_database_connection()
-    
     try:
-        chats = conn.execute(
-            "SELECT * FROM telegram_chats WHERE enabled = 1"
-        ).fetchall()
-        
-        return [dict(c) for c in chats]
+        rows = conn.execute("SELECT * FROM telegram_chats WHERE enabled = 1").fetchall()
+        return [dict(r) for r in rows]
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка получения чатов: {e}")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO получение чатов: {e}")
         return []
     finally:
         conn.close()
 
 
 def is_telegram_enabled():
-    """
-    Проверяет, включены ли уведомления в настройках
-    
-    Возвращает:
-        bool: True если enabled = '1'
-    """
+    """Проверяет, включены ли уведомления."""
     conn = get_database_connection()
-    
     try:
         row = conn.execute(
             "SELECT value FROM telegram_settings WHERE key = 'enabled'"
         ).fetchone()
-        
         return row is not None and row[0] == '1'
     except Exception:
         return False
@@ -821,23 +925,17 @@ def is_telegram_enabled():
 
 
 def cleanup_old_logs():
-    """
-    Удаляет старые записи из telegram_logs (старше 7 дней)
-    """
+    """Удаляет старые записи из telegram_logs (старше 7 дней)."""
     try:
         conn = get_database_connection()
-        
         deleted = conn.execute(
             "DELETE FROM telegram_logs WHERE ts < datetime('now', '+3 hours', '-7 days')"
         ).rowcount
-        
         conn.commit()
-        
         if deleted > 0:
-            print(f"[{datetime.now()}] 🧹 Очищено старых записей: {deleted}")
-    
+            print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Очищено старых записей: {deleted}")
     except Exception as e:
-        print(f"[{datetime.now()}] ⚠ Ошибка очистки: {e}")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] WARN очистка: {e}")
     finally:
         conn.close()
 
@@ -847,115 +945,122 @@ def cleanup_old_logs():
 # ============================================
 
 def run_bot():
-    """
-    Основной бесконечный цикл работы бота
-    """
-    print(f"[{datetime.now()}] 🤖 Telegram Bot запускается...")
-    print(f"[{datetime.now()}] 📁 База данных: {DB_PATH}")
-    print(f"[{datetime.now()}] ⏱  Интервал проверки: {CHECK_INTERVAL} сек")
-    
+    """Основной бесконечный цикл работы бота."""
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Telegram Bot v6.1 запускается...")
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] БД: {DB_PATH}")
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Интервал: {CHECK_INTERVAL} сек")
+
     cfg = get_config()
-    
     if not cfg:
-        print(f"[{datetime.now()}] ⚠ ВНИМАНИЕ: Конфигурация не найдена!")
-        print(f"[{datetime.now()}]    Путь: {CONFIG_FILE}")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] WARN конфигурация не найдена: {CONFIG_FILE}")
     elif not cfg['token']:
-        print(f"[{datetime.now()}] ⚠ ВНИМАНИЕ: Токен не настроен!")
-        print(f"[{datetime.now()}]    Файл: {CONFIG_FILE}")
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] WARN токен не настроен")
     else:
-        print(f"[{datetime.now()}] 🔑 Токен: {cfg['token'][:10]}...{cfg['token'][-4:]}")
-    
-    if cfg and cfg['proxy']:
-        print(f"[{datetime.now()}] 🌐 Прокси: настроен")
+        tok = cfg['token']
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Токен: {tok[:10]}...{tok[-4:]}")
+    if cfg and cfg.get('proxy'):
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Прокси: настроен")
     else:
-        print(f"[{datetime.now()}] 🌐 Подключение: прямое")
-    
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Подключение: прямое")
+
     cleanup_old_logs()
-    
+
     total_sent = 0
     checks = 0
-    
+
     while True:
         try:
             checks += 1
-            
+
             if not is_telegram_enabled():
                 if checks == 1 or checks % 60 == 0:
-                    print(f"[{datetime.now()}] ⏸ Уведомления отключены в настройках")
+                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Уведомления отключены")
                 time.sleep(CHECK_INTERVAL)
                 continue
-            
+
             cfg = get_config()
             if not cfg or not cfg['token']:
                 if checks == 1 or checks % 60 == 0:
-                    print(f"[{datetime.now()}] ⚠ Токен не настроен")
+                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] WARN токен не настроен")
                 time.sleep(CHECK_INTERVAL)
                 continue
-            
+
             chats = get_enabled_chats()
             if not chats:
                 if checks == 1 or checks % 60 == 0:
-                    print(f"[{datetime.now()}] ⚠ Нет активных получателей")
+                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] WARN нет активных получателей")
                 time.sleep(CHECK_INTERVAL)
                 continue
-            
+
             alerts = get_new_alerts()
-            
+
             for alert in alerts:
                 text = format_alert_message(alert)
                 sent_to = []
-                
+
                 for chat in chats:
                     chat_id = chat['chat_id']
-                    
-                    if alert['level'] == 'critical' and not chat.get('critical', True):
+                    lvl = alert['level']
+
+                    # Фильтрация по типу алерта
+                    if lvl == 'critical' and not chat.get('critical', True):
                         continue
-                    if alert['level'] == 'warning' and not chat.get('warning', True):
+                    if lvl == 'warning' and not chat.get('warning', True):
                         continue
-                    if alert['level'] == 'info' and not chat.get('info', False):
+                    if lvl == 'info' and not chat.get('info', False):
                         continue
-                    
+
                     if send_telegram_message(chat_id, text):
                         mark_alert_as_sent(alert['id'], chat_id)
                         sent_to.append(str(chat_id))
                         total_sent += 1
                         time.sleep(0.05)
-                
+
                 if sent_to:
-                    print(f"[{datetime.now()}] ✅ Отправлено: {alert['msg'][:60]}")
-                    print(f"[{datetime.now()}]    Получатели: {', '.join(sent_to)}")
-            
+                    downtime_info = f" | простой: {alert['downtime']}" if alert.get('downtime') else ""
+                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] OK {alert['msg'][:60]}{downtime_info}")
+                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}]    -> {', '.join(sent_to)}")
+
+            # Очистка каждые 6 минут (360 итераций)
             if checks % 360 == 0:
                 cleanup_old_logs()
-        
+
         except KeyboardInterrupt:
-            print(f"\n[{datetime.now()}] 🛑 Бот остановлен. Отправлено: {total_sent}")
+            print(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] Бот остановлен. Отправлено: {total_sent}")
             break
         except Exception as e:
-            print(f"[{datetime.now()}] ❌ Ошибка: {e}")
-            import traceback
+            print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO в главном цикле: {e}")
             traceback.print_exc()
-        
+
         time.sleep(CHECK_INTERVAL)
+
 
 if __name__ == '__main__':
     run_bot()
 TGBOTEOF
 
+# Подставляем интервал из переменной bash
 sed -i "s/CHECK_INTERVAL = 10/CHECK_INTERVAL = $CHECK_INTERVAL/" "$TGBOT_PY"
 
 chmod +x "$TGBOT_PY"
 chown www-data:www-data "$TGBOT_PY" 2>/dev/null || true
 
+# Проверяем синтаксис Python
 source "$INSTALL_DIR/venv/bin/activate"
-$VENV_PYTHON -c "import ast; ast.parse(open('$TGBOT_PY').read()); print('  ✓ Синтаксис tg_bot.py корректен')"
+if $VENV_PYTHON -c "import ast; ast.parse(open('$TGBOT_PY').read()); print('  OK Синтаксис tg_bot.py корректен')"; then
+    echo "  • Файл создан: $TGBOT_PY"
+    echo "    Размер: $(wc -c < "$TGBOT_PY") байт"
+    echo "    Строк: $(wc -l < "$TGBOT_PY")"
+else
+    echo -e "${RED}ОШИБКА СИНТАКСИСА В tg_bot.py${NC}"
+    echo "Проверьте файл: $TGBOT_PY"
+    deactivate
+    exit 1
+fi
 deactivate
 
-echo "  • Файл создан: $TGBOT_PY"
-echo "    Размер: $(wc -c < "$TGBOT_PY") байт"
-echo "    Строк: $(wc -l < "$TGBOT_PY")"
 echo ""
-echo -e "${GREEN}✅ Telegram бот создан${NC}"
+echo -e "${GREEN}Telegram бот создан${NC}"
 echo ""
 
 # ============================================
@@ -968,12 +1073,11 @@ echo -e "${YELLOW}════════════════════�
 echo ""
 
 if grep -q 'def api_telegram_chats\|TELEGRAM BOT API' "$APP_PY" 2>/dev/null; then
-    echo "  ⚠ API для Telegram уже существует в app.py"
-    echo "    Проверка: найдены существующие маршруты /api/telegram/"
-    echo "    Пропускаем интеграцию API."
+    echo "  API для Telegram уже существует в app.py"
+    echo "  Пропускаем интеграцию API."
 else
     echo "  • Добавление API endpoints в app.py..."
-    
+
     source "$INSTALL_DIR/venv/bin/activate"
     $VENV_PYTHON << 'PYAPIEOF'
 app_path = "/opt/trassir-monitor/app/app.py"
@@ -984,12 +1088,11 @@ with open(app_path, 'r') as f:
 api_block = '''
 
 # ============================================
-# TELEGRAM BOT API — УПРАВЛЕНИЕ УВЕДОМЛЕНИЯМИ
+# TELEGRAM BOT API
 # ============================================
 
 @app.route("/api/telegram/chats", methods=["GET", "POST", "PUT", "DELETE"])
 def api_telegram_chats():
-    """API для управления получателями Telegram уведомлений"""
     conn = get_db()
     if request.method == "GET":
         chats = conn.execute("SELECT * FROM telegram_chats ORDER BY id").fetchall()
@@ -1001,15 +1104,15 @@ def api_telegram_chats():
         name = data.get("name", "").strip()
         if not chat_id:
             conn.close()
-            return jsonify({"ok": 0, "error": "Не указан chat_id"}), 400
+            return jsonify({"ok": 0, "error": "Ne ukazan chat_id"}), 400
         try:
             conn.execute("INSERT INTO telegram_chats (chat_id, name) VALUES (?, ?)", (chat_id, name))
             conn.commit()
             conn.close()
-            return jsonify({"ok": 1, "message": "Получатель добавлен"})
-        except:
+            return jsonify({"ok": 1, "message": "Poluchatel dobavlen"})
+        except Exception:
             conn.close()
-            return jsonify({"ok": 0, "error": "Такой chat_id уже существует"}), 400
+            return jsonify({"ok": 0, "error": "Takoy chat_id uzhe est"}), 400
     elif request.method == "PUT":
         data = request.json
         cid = data.get("id")
@@ -1021,22 +1124,22 @@ def api_telegram_chats():
             )
             conn.commit()
         conn.close()
-        return jsonify({"ok": 1, "message": "Настройки получателя обновлены"})
+        return jsonify({"ok": 1})
     elif request.method == "DELETE":
         cid = request.args.get("id")
         if cid:
             conn.execute("DELETE FROM telegram_chats WHERE id=?", (cid,))
             conn.commit()
         conn.close()
-        return jsonify({"ok": 1, "message": "Получатель удалён"})
+        return jsonify({"ok": 1})
 
 
 @app.route("/api/telegram/settings", methods=["GET", "POST"])
 def api_telegram_settings():
-    """API для управления настройками Telegram"""
     conn = get_db()
     if request.method == "GET":
-        settings = dict(conn.execute("SELECT key, value FROM telegram_settings").fetchall())
+        rows = conn.execute("SELECT key, value FROM telegram_settings").fetchall()
+        settings = {r[0]: r[1] for r in rows}
         import configparser
         cfg = configparser.ConfigParser()
         cfg.read("/opt/trassir-monitor/config.ini")
@@ -1060,32 +1163,24 @@ def api_telegram_settings():
             )
         conn.commit()
         conn.close()
-        return jsonify({"ok": 1, "message": "Настройки сохранены"})
+        return jsonify({"ok": 1})
 
 
 @app.route("/api/telegram/test", methods=["POST"])
 def api_telegram_test():
-    """API для отправки тестового сообщения в Telegram"""
+    import sys, os
+    sys.path.insert(0, "/opt/trassir-monitor")
     from app.tg_bot import send_telegram_message, get_enabled_chats, format_test_message, get_config
-    from datetime import datetime
-    
-    data = request.json or {}
-    chat_id = data.get("chat_id")
-    
-    if not chat_id:
-        chats = get_enabled_chats()
-        if not chats:
-            return jsonify({"ok": 0, "error": "Нет активных получателей"}), 400
-        chat_id = chats[0]["chat_id"]
-    
+    chats = get_enabled_chats()
+    if not chats:
+        return jsonify({"ok": 0, "error": "Net aktivnykh poluchatelej"}), 400
     cfg = get_config()
-    monitor_url = cfg.get('monitor_url', '') if cfg else ''
-    test_msg = format_test_message(monitor_url)
-    
-    ok = send_telegram_message(chat_id, test_msg)
+    monitor_url = cfg.get("monitor_url", "") if cfg else ""
+    msg = format_test_message(monitor_url)
+    ok = send_telegram_message(chats[0]["chat_id"], msg)
     if ok:
-        return jsonify({"ok": 1, "message": "Тестовое сообщение отправлено"})
-    return jsonify({"ok": 0, "error": "Ошибка отправки. Проверьте токен и прокси."})
+        return jsonify({"ok": 1, "message": "Test otpravlen"})
+    return jsonify({"ok": 0, "error": "Oshibka otpravki. Proverte token i proksi."})
 '''
 
 marker = 'if __name__ != "__main__":'
@@ -1093,24 +1188,23 @@ if marker in content:
     content = content.replace(marker, api_block + '\n\n' + marker)
     with open(app_path, 'w') as f:
         f.write(content)
-    print("    ✓ API endpoints добавлены в app.py")
+    print("    OK API endpoints dobavleny v app.py")
 else:
-    print("    ❌ Маркер для вставки не найден в app.py")
+    print("    WARN marker ne najden v app.py, propuskaem")
 PYAPIEOF
 
-    if $VENV_PYTHON -c "import ast; ast.parse(open('$APP_PY').read()); print('    ✓ Синтаксис app.py корректен')" 2>&1; then
-        echo "    ✓ Проверка синтаксиса пройдена"
+    if $VENV_PYTHON -c "import ast; ast.parse(open('$APP_PY').read()); print('    OK Sintaksis app.py korrektny')" 2>&1; then
+        echo "    Проверка синтаксиса пройдена"
     else
-        echo "    ❌ Обнаружена синтаксическая ошибка!"
-        echo "    Восстанавливаю оригинальный файл из бэкапа..."
+        echo -e "    ${RED}Синтаксическая ошибка! Восстанавливаю из бэкапа...${NC}"
         cp "$BACKUP_DIR/app.py.bak" "$APP_PY"
-        echo "    ✓ Восстановлено. API не добавлен."
+        echo "    Восстановлено. API не добавлен."
     fi
     deactivate
 fi
 
 echo ""
-echo -e "${GREEN}✅ Интеграция API завершена${NC}"
+echo -e "${GREEN}Интеграция API завершена${NC}"
 echo ""
 
 # ============================================
@@ -1150,44 +1244,39 @@ cat > "$SETTINGS_HTML" << 'HTMLFINAL'
                 <form id="settingsForm">
                     <div class="mb-3">
                         <label class="form-label">Интервал опроса (секунд)</label>
-                        <input type="number" class="form-control" name="poll_interval" 
+                        <input type="number" class="form-control" name="poll_interval"
                                value="{{ settings.poll_interval }}">
                         <small class="text-muted">Как часто опрашивать серверы TRASSIR</small>
                     </div>
-                    
                     <div class="mb-3">
                         <label class="form-label">Хранение данных (дней)</label>
-                        <input type="number" class="form-control" name="retention_days" 
+                        <input type="number" class="form-control" name="retention_days"
                                value="{{ settings.retention_days }}">
-                        <small class="text-muted">Сколько дней хранить историю и алерты</small>
                     </div>
-                    
                     <div class="row">
                         <div class="col-6">
                             <label class="form-label">CPU Warning (%)</label>
-                            <input type="number" class="form-control" name="cpu_warning" 
+                            <input type="number" class="form-control" name="cpu_warning"
                                    value="{{ settings.cpu_warning }}">
                         </div>
                         <div class="col-6">
                             <label class="form-label">CPU Critical (%)</label>
-                            <input type="number" class="form-control" name="cpu_critical" 
+                            <input type="number" class="form-control" name="cpu_critical"
                                    value="{{ settings.cpu_critical }}">
                         </div>
                     </div>
-                    
                     <div class="row mt-3">
                         <div class="col-6">
                             <label class="form-label">Архив Warning (дней)</label>
-                            <input type="number" class="form-control" name="archive_warning_days" 
+                            <input type="number" class="form-control" name="archive_warning_days"
                                    value="{{ settings.archive_warning_days }}">
                         </div>
                         <div class="col-6">
                             <label class="form-label">Архив Critical (дней)</label>
-                            <input type="number" class="form-control" name="archive_critical_days" 
+                            <input type="number" class="form-control" name="archive_critical_days"
                                    value="{{ settings.archive_critical_days }}">
                         </div>
                     </div>
-                    
                     <button type="submit" class="btn btn-primary mt-3">
                         <i class="bi bi-check-lg"></i> Сохранить настройки
                     </button>
@@ -1195,7 +1284,7 @@ cat > "$SETTINGS_HTML" << 'HTMLFINAL'
             </div>
         </div>
     </div>
-    
+
     <!-- Список серверов -->
     <div class="col-lg-6">
         <div class="card">
@@ -1220,7 +1309,7 @@ cat > "$SETTINGS_HTML" << 'HTMLFINAL'
                                 <td>{{ server.ip }}</td>
                                 <td>{{ server.port }}</td>
                                 <td>
-                                    <button class="btn btn-sm btn-danger" 
+                                    <button class="btn btn-sm btn-danger"
                                             onclick="if(confirm('Удалить сервер {{ server.name }}?'))fetch('/api/servers?id={{ server.id }}',{method:'DELETE'}).then(function(){location.reload()})">
                                         <i class="bi bi-trash"></i> Удалить
                                     </button>
@@ -1236,9 +1325,7 @@ cat > "$SETTINGS_HTML" << 'HTMLFINAL'
         </div>
     </div>
 
-    <!-- ============================================ -->
-    <!-- TELEGRAM УВЕДОМЛЕНИЯ                         -->
-    <!-- ============================================ -->
+    <!-- Telegram уведомления -->
     <div class="col-lg-6">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -1258,18 +1345,17 @@ cat > "$SETTINGS_HTML" << 'HTMLFINAL'
                 </style>
                 <div id="tgTokenInfo" class="mb-3 p-3 rounded" style="background: var(--bg);">
                     <div class="spinner-border spinner-border-sm" role="status"></div>
-                    Загрузка информации о конфигурации...
+                    Загрузка конфигурации...
                 </div>
-                
+
                 <div class="mb-3">
-                    <label class="form-label">👥 Получатели уведомлений:</label>
+                    <label class="form-label">Получатели уведомлений:</label>
                     <div id="tgChatsList" class="mb-3" style="max-height: 200px; overflow-y: auto;">
                         <div class="text-center py-3">
                             <div class="spinner-border spinner-border-sm" role="status"></div>
-                            <span class="ms-2" style="color: var(--muted);">Загрузка списка получателей...</span>
+                            <span class="ms-2" style="color: var(--muted);">Загрузка...</span>
                         </div>
                     </div>
-                    
                     <div class="input-group input-group-sm mb-2">
                         <input type="text" class="form-control" id="tgNewChatId" placeholder="Chat ID">
                         <input type="text" class="form-control" id="tgNewChatName" placeholder="Имя">
@@ -1277,100 +1363,148 @@ cat > "$SETTINGS_HTML" << 'HTMLFINAL'
                     </div>
                     <small class="text-muted">Узнать Chat ID: @userinfobot в Telegram</small>
                 </div>
-                
+
                 <div class="form-check form-switch mb-3">
                     <input class="form-check-input" type="checkbox" id="tgEnabled" onchange="tgSaveSettings()">
                     <label class="form-check-label"><b>Включить уведомления в Telegram</b></label>
                 </div>
-                
+
                 <div class="d-flex gap-2">
-                    <button class="btn btn-outline-info btn-sm" onclick="tgTest()"><i class="bi bi-send"></i> Тест</button>
-                    <button class="btn btn-outline-secondary btn-sm" onclick="tgRefresh()"><i class="bi bi-arrow-clockwise"></i> Обновить</button>
+                    <button class="btn btn-outline-info btn-sm" onclick="tgTest()">
+                        <i class="bi bi-send"></i> Тест
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="tgRefresh()">
+                        <i class="bi bi-arrow-clockwise"></i> Обновить
+                    </button>
                 </div>
-                <div id="tgResult" class="mt-2" style="display: none;"></div>
+                <div id="tgResult" class="mt-2" style="display:none;"></div>
             </div>
         </div>
     </div>
 </div>
 
 <script>
-function tgRefresh(){tgLoadSettings();tgLoadChats();}
+function tgRefresh(){ tgLoadSettings(); tgLoadChats(); }
+
 function tgLoadSettings(){
-    fetch("/api/telegram/settings").then(function(r){return r.json()}).then(function(s){
-        document.getElementById("tgEnabled").checked=(s.enabled==="1");
-        var b=document.getElementById("tgStatusBadge");
-        if(s.enabled==="1"&&s.token_configured){b.className="badge bg-success fs-6";b.textContent="✅ Активен";}
-        else if(s.enabled==="1"){b.className="badge bg-warning fs-6";b.textContent="⚠ Нет токена";}
-        else{b.className="badge bg-secondary fs-6";b.textContent="⏸ Выключен";}
-        var i="";
+    fetch("/api/telegram/settings").then(function(r){ return r.json(); }).then(function(s){
+        document.getElementById("tgEnabled").checked = (s.enabled === "1");
+        var b = document.getElementById("tgStatusBadge");
+        if(s.enabled === "1" && s.token_configured){
+            b.className = "badge bg-success fs-6"; b.textContent = "Активен";
+        } else if(s.enabled === "1"){
+            b.className = "badge bg-warning fs-6"; b.textContent = "Нет токена";
+        } else {
+            b.className = "badge bg-secondary fs-6"; b.textContent = "Выключен";
+        }
+        var i = "";
         if(s.token_configured){
-            i="<b>Токен:</b> <span style='color:var(--green)'>"+s.token_masked+"</span>";
-            if(s.proxy_configured)i+=" | 🌐 Прокси настроен";
-            if(s.monitor_url)i+="<br><b>Монитор:</b> "+s.monitor_url;
-        }else{i="<span style='color:var(--red)'>❌ Токен не настроен</span>";}
-        document.getElementById("tgTokenInfo").innerHTML=i;
+            i = "<b>Токен:</b> <span style='color:var(--green)'>" + s.token_masked + "</span>";
+            if(s.proxy_configured) i += " | Прокси настроен";
+            if(s.monitor_url) i += "<br><b>Монитор:</b> " + s.monitor_url;
+        } else {
+            i = "<span style='color:var(--red)'>Токен не настроен</span>";
+        }
+        document.getElementById("tgTokenInfo").innerHTML = i;
     });
 }
+
 function tgLoadChats(){
-    fetch("/api/telegram/chats").then(function(r){return r.json()}).then(function(chats){
-        var h="";
-        if(chats.length===0){h="<p style='color:var(--muted)'>Нет получателей</p>";}
-        else{chats.forEach(function(c){
-            h+="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;padding:6px 10px;background:var(--bg);border-radius:6px'>";
-            h+="<div><span class='badge bg-"+(c.enabled?"success":"secondary")+" me-1'>"+(c.enabled?"вкл":"выкл")+"</span>";
-            h+="<b>"+(c.name||"без имени")+"</b> <code>"+c.chat_id+"</code></div>";
-            h+="<div>";
-            h+="<button class='btn btn-sm btn-outline-info me-1' onclick='tgEditChat("+c.id+")' title='Редактировать'>✏</button>";
-            h+="<button class='btn btn-sm btn-outline-danger' onclick='tgDeleteChat("+c.id+")' title='Удалить'>✕</button>";
-            h+="</div></div>";
-        });}
-        document.getElementById("tgChatsList").innerHTML=h;
+    fetch("/api/telegram/chats").then(function(r){ return r.json(); }).then(function(chats){
+        var h = "";
+        if(chats.length === 0){
+            h = "<p style='color:var(--muted)'>Нет получателей</p>";
+        } else {
+            chats.forEach(function(c){
+                h += "<div style='display:flex;justify-content:space-between;align-items:center;"
+                   + "margin-bottom:4px;padding:6px 10px;background:var(--bg);border-radius:6px'>";
+                h += "<div><span class='badge bg-" + (c.enabled ? "success" : "secondary") + " me-1'>"
+                   + (c.enabled ? "вкл" : "выкл") + "</span>";
+                h += "<b>" + (c.name || "без имени") + "</b> <code>" + c.chat_id + "</code></div>";
+                h += "<div>";
+                h += "<button class='btn btn-sm btn-outline-info me-1' onclick='tgEditChat(" + c.id + ")'>&#9999;</button>";
+                h += "<button class='btn btn-sm btn-outline-danger' onclick='tgDeleteChat(" + c.id + ")'>&#10005;</button>";
+                h += "</div></div>";
+            });
+        }
+        document.getElementById("tgChatsList").innerHTML = h;
     });
 }
+
 function tgAddChat(){
-    var id=document.getElementById("tgNewChatId").value.trim();
-    var nm=document.getElementById("tgNewChatName").value.trim();
-    if(!id){alert("Введите Chat ID");return;}
-    fetch("/api/telegram/chats",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:id,name:nm})})
-    .then(function(r){return r.json()}).then(function(d){
-        if(d.ok){document.getElementById("tgNewChatId").value="";document.getElementById("tgNewChatName").value="";tgLoadChats();tgShowResult(d.message,"success");}
-        else tgShowResult(d.error,"danger");
+    var id = document.getElementById("tgNewChatId").value.trim();
+    var nm = document.getElementById("tgNewChatName").value.trim();
+    if(!id){ alert("Введите Chat ID"); return; }
+    fetch("/api/telegram/chats", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({chat_id: id, name: nm})
+    }).then(function(r){ return r.json(); }).then(function(d){
+        if(d.ok){
+            document.getElementById("tgNewChatId").value = "";
+            document.getElementById("tgNewChatName").value = "";
+            tgLoadChats();
+            tgShowResult(d.message, "success");
+        } else {
+            tgShowResult(d.error, "danger");
+        }
     });
 }
+
 function tgEditChat(dbId){
-    fetch("/api/telegram/chats").then(function(r){return r.json()}).then(function(chats){
-        var chat=chats.find(function(c){return c.id===dbId;});
-        if(!chat)return;
-        var newId=prompt("Новый Chat ID:",chat.chat_id);
-        if(newId===null)return;
-        var newName=prompt("Новое имя:",chat.name||"");
-        if(newName===null)return;
-        var data={id:dbId,name:newName||""};
-        if(newId.trim()!==""&&newId.trim()!==chat.chat_id)data.chat_id=newId.trim();
-        fetch("/api/telegram/chats",{method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)})
-        .then(function(r){return r.json()}).then(function(d){if(d.ok)tgLoadChats();else tgShowResult(d.error,"danger");});
+    fetch("/api/telegram/chats").then(function(r){ return r.json(); }).then(function(chats){
+        var chat = chats.find(function(c){ return c.id === dbId; });
+        if(!chat) return;
+        var newName = prompt("Новое имя:", chat.name || "");
+        if(newName === null) return;
+        fetch("/api/telegram/chats", {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({id: dbId, name: newName, enabled: chat.enabled,
+                                  warning: chat.warning, critical: chat.critical, info: chat.info})
+        }).then(function(r){ return r.json(); }).then(function(d){
+            if(d.ok) tgLoadChats(); else tgShowResult(d.error, "danger");
+        });
     });
 }
-function tgDeleteChat(id){if(confirm("Удалить получателя?"))fetch("/api/telegram/chats?id="+id,{method:"DELETE"}).then(function(){tgLoadChats();});}
+
+function tgDeleteChat(id){
+    if(confirm("Удалить получателя?")){
+        fetch("/api/telegram/chats?id=" + id, {method: "DELETE"}).then(function(){ tgLoadChats(); });
+    }
+}
+
 function tgSaveSettings(){
-    fetch("/api/telegram/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled:document.getElementById("tgEnabled").checked?"1":"0"})}).then(function(){tgLoadSettings();});
+    fetch("/api/telegram/settings", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({enabled: document.getElementById("tgEnabled").checked ? "1" : "0"})
+    }).then(function(){ tgLoadSettings(); });
 }
+
 function tgTest(){
-    var e=document.getElementById("tgResult");e.style.display="block";e.className="mt-2 alert alert-info";e.textContent="Отправка тестового сообщения...";
-    fetch("/api/telegram/test",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})
-    .then(function(r){return r.json()}).then(function(d){
-        e.className="mt-2 alert alert-"+(d.ok?"success":"danger");
-        e.textContent=d.ok?d.message:d.error;
-        setTimeout(function(){e.style.display="none"},5000);
+    var e = document.getElementById("tgResult");
+    e.style.display = "block"; e.className = "mt-2 alert alert-info";
+    e.textContent = "Отправка тестового сообщения...";
+    fetch("/api/telegram/test", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+    }).then(function(r){ return r.json(); }).then(function(d){
+        e.className = "mt-2 alert alert-" + (d.ok ? "success" : "danger");
+        e.textContent = d.ok ? d.message : d.error;
+        setTimeout(function(){ e.style.display = "none"; }, 5000);
     });
 }
-function tgShowResult(msg,type){
-    var e=document.getElementById("tgResult");e.style.display="block";e.className="mt-2 alert alert-"+type;e.textContent=msg;
-    setTimeout(function(){e.style.display="none"},5000);
+
+function tgShowResult(msg, type){
+    var e = document.getElementById("tgResult");
+    e.style.display = "block"; e.className = "mt-2 alert alert-" + type; e.textContent = msg;
+    setTimeout(function(){ e.style.display = "none"; }, 5000);
 }
+
 tgRefresh();
 </script>
-
 {% endblock %}
 
 {% block scripts %}
@@ -1385,7 +1519,7 @@ document.getElementById('settingsForm').addEventListener('submit', async functio
         body: JSON.stringify(data)
     });
     if (response.ok) {
-        alert('Настройки сохранены! Изменения вступят в силу при следующем опросе.');
+        alert('Настройки сохранены!');
     } else {
         alert('Ошибка при сохранении настроек');
     }
@@ -1394,7 +1528,7 @@ document.getElementById('settingsForm').addEventListener('submit', async functio
 {% endblock %}
 HTMLFINAL
 
-echo "  ✓ settings.html полностью заменён"
+echo "  OK settings.html полностью заменён"
 echo ""
 
 # ============================================
@@ -1409,7 +1543,6 @@ echo ""
 cat > "/etc/systemd/system/$SERVICE_BOT.service" << SERVEOF
 [Unit]
 Description=TRASSIR Monitor Telegram Bot
-Documentation=https://github.com/trassir-monitor
 After=$SERVICE_MAIN.service
 Requires=$SERVICE_MAIN.service
 
@@ -1435,12 +1568,12 @@ chown www-data:www-data "$LOG_DIR/tgbot.log" "$LOG_DIR/tgbot-error.log" 2>/dev/n
 systemctl daemon-reload
 systemctl enable "$SERVICE_BOT" 2>/dev/null
 
-echo "  • Сервис создан: /etc/systemd/system/$SERVICE_BOT.service"
-echo "  • Логи: $LOG_DIR/tgbot.log"
+echo "  • Сервис: /etc/systemd/system/$SERVICE_BOT.service"
+echo "  • Логи:   $LOG_DIR/tgbot.log"
 echo "  • Автозапуск: включён"
 
 echo ""
-echo -e "${GREEN}✅ Systemd сервис создан${NC}"
+echo -e "${GREEN}Systemd сервис создан${NC}"
 echo ""
 
 # ============================================
@@ -1455,28 +1588,24 @@ echo ""
 echo "  • Перезапуск TRASSIR Monitor..."
 systemctl restart "$SERVICE_MAIN"
 sleep 3
-
 MAIN_STATUS=$(systemctl is-active "$SERVICE_MAIN" 2>/dev/null || echo "inactive")
 echo "    Статус: $MAIN_STATUS"
 
 echo "  • Запуск Telegram Bot..."
 systemctl start "$SERVICE_BOT"
 sleep 3
-
 BOT_STATUS=$(systemctl is-active "$SERVICE_BOT" 2>/dev/null || echo "inactive")
 echo "    Статус: $BOT_STATUS"
 
 if [ "$BOT_STATUS" != "active" ]; then
     echo ""
-    echo -e "  ${RED}❌ Бот не запустился!${NC}"
+    echo -e "  ${RED}Бот не запустился!${NC}"
     echo "  Проверьте логи:"
-    echo "    journalctl -u $SERVICE_BOT -n 20"
-    echo "    tail -20 $LOG_DIR/tgbot-error.log"
+    echo "    journalctl -u $SERVICE_BOT -n 30"
+    echo "    tail -30 $LOG_DIR/tgbot-error.log"
 fi
 
 echo ""
-
-# Отправка тестового сообщения
 echo "  • Отправка тестового сообщения..."
 source "$INSTALL_DIR/venv/bin/activate"
 
@@ -1506,26 +1635,25 @@ deactivate
 
 case "$TEST_RESULT" in
     OK)
-        echo -e "  ${GREEN}✅ Тестовое сообщение отправлено успешно!${NC}"
+        echo -e "  ${GREEN}Тестовое сообщение отправлено успешно!${NC}"
         echo "     Проверьте Telegram — должно прийти сообщение."
         ;;
     NO_CHATS)
-        echo -e "  ${YELLOW}⚠ Нет получателей для отправки теста${NC}"
+        echo -e "  ${YELLOW}Нет получателей для отправки теста${NC}"
         echo "     Добавьте получателей через веб-интерфейс /settings"
         ;;
     *)
-        echo -e "  ${RED}❌ Тестовое сообщение не отправлено${NC}"
+        echo -e "  ${RED}Тестовое сообщение не отправлено${NC}"
         echo ""
         echo "  Возможные причины:"
         echo "    1. Неправильный токен бота"
-        echo "    2. Прокси не работает"
+        echo "    2. Прокси не работает или не указан"
         echo "    3. Нет доступа к api.telegram.org"
         echo "    4. Неправильный Chat ID"
         echo ""
         echo "  Проверьте:"
-        echo "    • Конфигурацию: $CONFIG_FILE"
-        echo "    • Логи бота: tail -f $LOG_DIR/tgbot.log"
-        echo "    • Логи ошибок: tail -20 $LOG_DIR/tgbot-error.log"
+        echo "    nano $CONFIG_FILE"
+        echo "    tail -f $LOG_DIR/tgbot.log"
         ;;
 esac
 
@@ -1536,49 +1664,37 @@ IP=$(hostname -I | awk '{print $1}')
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
-echo -e "${GREEN}║   Telegram Bot — УСТАНОВЛЕН! 🎉               ║${NC}"
-echo -e "${GREEN}║   v6.0 FINAL — Все функции активны            ║${NC}"
+echo -e "${GREEN}║   Telegram Bot v6.1 — УСТАНОВЛЕН!            ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "${BOLD}🌐 Веб-управление:${NC}"
+echo -e "${BOLD}Веб-управление:${NC}"
 echo -e "   ${CYAN}http://${IP}:8080/settings${NC}"
-echo -e "   (прокрутите вниз до карточки Telegram)"
 echo ""
-echo -e "${BOLD}📋 Управление ботом:${NC}"
+echo -e "${BOLD}Управление ботом:${NC}"
 echo -e "   Статус:      ${YELLOW}systemctl status $SERVICE_BOT${NC}"
 echo -e "   Перезапуск:  ${YELLOW}systemctl restart $SERVICE_BOT${NC}"
 echo -e "   Остановка:   ${YELLOW}systemctl stop $SERVICE_BOT${NC}"
 echo -e "   Логи:        ${YELLOW}tail -f $LOG_DIR/tgbot.log${NC}"
 echo -e "   Логи ошибок: ${YELLOW}tail -f $LOG_DIR/tgbot-error.log${NC}"
 echo ""
-echo -e "${BOLD}📁 Файлы:${NC}"
+echo -e "${BOLD}Файлы:${NC}"
 echo -e "   Конфигурация: ${CYAN}$CONFIG_FILE${NC} (chmod 600)"
 echo -e "   Код бота:     ${CYAN}$TGBOT_PY${NC}"
 echo -e "   Бэкап:        ${CYAN}$BACKUP_DIR${NC}"
 echo ""
-echo -e "${BOLD}✅ Возможности веб-интерфейса:${NC}"
-echo -e "   • Просмотр статуса токена и прокси"
-echo -e "   • Добавление и удаление получателей"
-echo -e "   • ✏ Редактирование Chat ID и имени"
-echo -e "   • Включение и выключение уведомлений"
-echo -e "   • Отправка тестового сообщения"
+echo -e "${BOLD}Формат уведомлений в Telegram:${NC}"
+echo -e "   [OK]  ВОССТАНОВЛЕНИЕ — канал/сервер вернулся"
+echo -e "         + время простоя (сколько был недоступен)"
+echo -e "   [CAM] ОТВАЛ КАМЕР — с именами каналов"
+echo -e "   [CPU] ВЫСОКАЯ НАГРУЗКА CPU"
+echo -e "   [ARC] ПРОБЛЕМА С АРХИВОМ"
+echo -e "   [DSK] ОШИБКА ДИСКОВ"
+echo -e "   [XX]  КРИТИЧЕСКИЙ АЛЕРТ"
+echo -e "   Для каждого: CPU%, камеры онлайн, архив, uptime, отклик"
 echo ""
-echo -e "${BOLD}📱 Формат уведомлений в Telegram:${NC}"
-echo -e "   📷 ОТВАЛ КАМЕР — с указанием имён"
-echo -e "   🔥 ВЫСОКАЯ НАГРУЗКА CPU"
-echo -e "   💾 ПРОБЛЕМА С АРХИВОМ"
-echo -e "   💿 ОШИБКА ДИСКОВ"
-echo -e "   🔴 КРИТИЧЕСКИЙ АЛЕРТ"
-echo -e "   Для каждого: состояние сервера, uptime, отклик"
-echo ""
-echo -e "${BOLD}🛡 Защита от спама:${NC}"
-echo -e "   • 1 проблема = 1 сообщение"
-echo -e "   • Бот проверяет БД перед отправкой"
-echo -e "   • Повторов нет"
-echo -e "   • Новый алерт после восстановления = новое сообщение"
-echo ""
-echo -e "${BOLD}🔧 Изменение токена или прокси:${NC}"
-echo -e "   1. Отредактируйте: ${YELLOW}nano $CONFIG_FILE${NC}"
-echo -e "   2. Перезапустите: ${YELLOW}systemctl restart $SERVICE_BOT${NC}"
+echo -e "${BOLD}Расчёт времени простоя:${NC}"
+echo -e "   При восстановлении камеры — ищется момент её отвала"
+echo -e "   При восстановлении сервера — ищется последний offline-алерт"
+echo -e "   Пример: 'Время простоя: 2 ч 15 мин'"
 echo ""
