@@ -638,7 +638,6 @@ def collect():
         ).fetchall())
         
         updates = []
-        offline_names = []
         
         # Обрабатываем каждый сервер
         for server in servers:
@@ -678,21 +677,72 @@ def collect():
                     health["uptime"],
                     health["rt"]
                 ))
+                conn.commit()  # ← ВАЖНО! Сохраняем health сразу
+                
+                # Инициализируем channels_info (может понадобиться)
+                channels_info = None
+                offline_names = []
+                
+                # ============================================
+                # ПРОВЕРКА ВОССТАНОВЛЕНИЯ КАНАЛОВ (ВСЕГДА)
+                # ============================================
+                try:
+                    old_alerts = conn.execute(
+                        "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'Камер офлайн%' AND ack = 0",
+                        (server_id,)
+                    ).fetchall()
+                    
+                    if old_alerts:
+                        channels_info = client.get_channels_info()
+                        if channels_info and channels_info.get("ok"):
+                            online_channels = {name for name, status in channels_info["channels"].items() if status}
+                            
+                            for old_alert in old_alerts:
+                                offline_names_in_alert = re.findall(r'#[^,]+', old_alert["msg"])
+                                all_online = True
+                                for offline_name in offline_names_in_alert:
+                                    found_online = False
+                                    for online_name in online_channels:
+                                        if offline_name.strip() in online_name:
+                                            found_online = True
+                                            break
+                                    if not found_online:
+                                        all_online = False
+                                
+                                if all_online:
+                                    conn.execute("UPDATE alerts SET ack = 1 WHERE id = ?", (old_alert["id"],))
+                                    conn.commit()
+                                    
+                                    recovered_list = [n.strip() for n in offline_names_in_alert]
+                                    recovery_msg = f"Канал восстановлен: {recovered_list[0]}" if len(recovered_list) == 1 else f"Каналы восстановлены ({len(recovered_list)})"
+                                    
+                                    dup = conn.execute(
+                                        "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ts > datetime('now', '+3 hours', '-1 hours')",
+                                        (server_id, recovery_msg)
+                                    ).fetchone()
+                                    
+                                    if not dup:
+                                        conn.execute(
+                                            "INSERT INTO alerts (server_id, ts, level, msg, ack) VALUES (?, datetime('now', '+3 hours'), 'info', ?, 1)",
+                                            (server_id, recovery_msg)
+                                        )
+                                        conn.commit()
+                                        print(f"  ✅ {server_name}: {recovery_msg}")
+                except Exception as e:
+                    print(f"  ⚠ Ошибка при проверке восстановления каналов для {server_name}: {e}")
                 
                 # ============================================
                 # ОПРЕДЕЛЕНИЕ ИМЁН ОТКЛЮЧЁННЫХ КАНАЛОВ
                 # ============================================
-                offline_names = []
                 
-                # Запрашиваем детальную информацию только если есть отвал
                 if health["ch_t"] > health["ch_o"]:
                     print(f"  {server_name}: обнаружен отвал камер ({health['ch_o']}/{health['ch_t']}), запрашиваю имена...")
                     
                     try:
-                        channels_info = client.get_channels_info()
+                        if not channels_info or not channels_info.get("ok"):
+                            channels_info = client.get_channels_info()
                         
-                        if channels_info["ok"]:
-                            # Собираем имена офлайн-каналов
+                        if channels_info and channels_info.get("ok"):
                             for channel_name, is_online in channels_info["channels"].items():
                                 if not is_online:
                                     offline_names.append(channel_name)
@@ -706,37 +756,29 @@ def collect():
                 # ============================================
                 alerts_list = []
                 
-                # Проверка дисков
                 if health["disks"] == 0:
                     alerts_list.append(("critical", "Ошибка дисков"))
                 
-                # Проверка отвала камер
                 offline_count = health["ch_t"] - health["ch_o"]
                 if offline_count > 0:
                     if offline_names:
-                        # Показываем конкретные имена каналов
                         names_str = ", ".join(offline_names[:5])
                         message = f"Камер офлайн ({offline_count}): {names_str}"
                         if len(offline_names) > 5:
                             message += f" + ещё {len(offline_names) - 5}"
                         alerts_list.append(("warning", message))
                     else:
-                        # Имена не получены, показываем количество
                         alerts_list.append(("warning", f"Камер офлайн: {offline_count}/{health['ch_t']}"))
                 
-                # Проверка загрузки CPU
                 cpu_warning = float(settings.get("cpu_warning", 80))
                 if health["cpu"] >= cpu_warning:
                     alerts_list.append(("warning", f"CPU: {health['cpu']:.1f}%"))
                 
-                # Проверка глубины архива
                 arch_warning = float(settings.get("archive_warning_days", 14))
                 if health["arch"] <= arch_warning:
                     alerts_list.append(("warning", f"Архив: {health['arch']:.1f} дн"))
                 
-                # Сохраняем алерты в БД (только если такого ещё нет)
                 for level, message in alerts_list:
-                    # Проверяем существует ли уже такой алерт
                     existing = conn.execute(
                         "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ack = 0",
                         (server_id, message)
@@ -747,6 +789,7 @@ def collect():
                             "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
                             (server_id, level, message)
                         )
+                        conn.commit()  # ← ВАЖНО! Сохраняем алерт сразу
                 
                 # ============================================
                 # ДАННЫЕ ДЛЯ WEBSOCKET
@@ -770,7 +813,6 @@ def collect():
                     ).fetchone()["cnt"]
                 })
             else:
-                # Сервер не ответил
                 updates.append({
                     "id": server_id,
                     "name": server_name,
@@ -778,50 +820,20 @@ def collect():
                     "ok": 0,
                     "alerts": 0
                 })
-            
-            # Фиксируем изменения в БД после каждого сервера
-            conn.commit()
-        
-        # ============================================
-        # ОЧИСТКА СТАРЫХ ДАННЫХ
-        # ============================================
-        retention_days = settings.get("retention_days", "30")
-        conn.execute(
-            f"DELETE FROM health WHERE ts < datetime('now', '+3 hours', '-{retention_days} days')"
-        )
-        conn.execute(
-            f"DELETE FROM alerts WHERE ts < datetime('now', '+3 hours', '-{retention_days} days') AND ack = 1"
-        )
-        conn.commit()
-        conn.close()
-        
-        # ============================================
-        # ОТПРАВКА ДАННЫХ КЛИЕНТАМ
-        # ============================================
+
+        # Сохраняем в кэш
         servers_cache = updates
         
-        # Отправляем через WebSocket
-        socketio.emit("update", {"servers": updates})
+        # Отправляем обновления через WebSocket
+        if updates:
+            socketio.emit('update', {'servers': updates})
         
-        # Логирование
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] Собраны данные: {len(updates)} серверов")
+        conn.commit()  # ← Финальный commit
+        conn.close()
         
-        # Записываем в лог-файл
-        try:
-            with open(os.path.join(LOG_DIR, "collect.log"), "a") as log_file:
-                log_file.write(f"{timestamp} Sent {len(updates)} servers\n")
-                if offline_names:
-                    log_file.write(f"{timestamp} Offline cameras: {', '.join(offline_names)}\n")
-        except Exception:
-            pass
-    
     except Exception as e:
-        print(f"Ошибка сбора данных: {e}")
-        import traceback
-        traceback.print_exc()
-
-
+        print(f"Ошибка при сборе данных: {e}")
+        
 # ============================================
 # ПЛАНИРОВЩИК
 # ============================================
@@ -1653,21 +1665,32 @@ cat > $INSTALL_DIR/templates/base.html << 'BASEEOF'
         /* АЛЕРТЫ                                         */
         /* ============================================ */
         .alert-item {
-            padding: 12px 16px;
-            margin-bottom: 8px;
-            border-radius: 8px;
-            border-left: 4px solid;
-            font-size: 0.9rem;
+            padding: 16px 20px;
+            margin-bottom: 12px;
+            border-radius: 12px;
+            border-left: 6px solid;
+            font-size: 0.95rem;
         }
         
         .alert-item.critical {
-            background: rgba(239, 68, 68, 0.1);
-            border-color: var(--red);
+            background: rgba(239, 68, 68, 0.2);
+            border-color: #ef4444;
+            box-shadow: 0 0 20px rgba(239, 68, 68, 0.3);
+            color: #fca5a5;
         }
         
         .alert-item.warning {
-            background: rgba(245, 158, 11, 0.1);
-            border-color: var(--yellow);
+            background: rgba(245, 158, 11, 0.2);
+            border-color: #f59e0b;
+            box-shadow: 0 0 20px rgba(245, 158, 11, 0.3);
+            color: #fcd34d;
+        }
+        
+        .alert-item.info {
+            background: rgba(16, 185, 129, 0.15);
+            border-color: #10b981;
+            box-shadow: 0 0 15px rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
         }
         
         /* ============================================ */
@@ -2347,11 +2370,11 @@ cat > $INSTALL_DIR/templates/server.html << 'SERVEREOF'
     <div class="col-md-2">
         <div class="card">
             <div class="card-body text-center">
-                <i class="bi bi-hdd" style="font-size: 2rem; color: {% if cur and cur.disks %}var(--green){% else %}var(--red){% endif %};"></i>
-                <h3 class="mt-2 mb-0">
+                <i class="bi bi-hdd" style="font-size: 2rem; color: {% if cur and cur.disks == 1 %}var(--green){% else %}var(--red){% endif %};"></i>
+                <h3 class="mt-2 mb-0" id="disksValue">
                     {% if cur %}
-                        {% if cur.disks %}✅{% else %}❌{% endif %}
-                    {% else %}?{% endif %}
+                        {% if cur.disks == 1 %}✅{% else %}❌{% endif %}
+                    {% else %}--{% endif %}
                 </h3>
                 <small style="color: var(--muted);">Состояние дисков</small>
             </div>
@@ -2423,13 +2446,21 @@ cat > $INSTALL_DIR/templates/server.html << 'SERVEREOF'
                 {% if alerts %}
                     {% for alert in alerts %}
                     <div class="alert-item {{ alert.level }}">
-                        <div class="d-flex justify-content-between">
-                            <strong>
-                                {% if alert.level == 'critical' %}🔴{% else %}🟡{% endif %}
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <strong style="font-size: 1.1rem;">
+                                {% if alert.level == 'critical' %}
+                                    🔴 КРИТИЧЕСКАЯ ОШИБКА
+                                {% elif alert.level == 'warning' %}
+                                    ⚠️ ПРЕДУПРЕЖДЕНИЕ
+                                {% else %}
+                                    ℹ️ ИНФОРМАЦИЯ
+                                {% endif %}
                             </strong>
-                            <small style="color: var(--muted);">{{ alert.ts }}</small>
+                            <span class="badge bg-dark">{{ alert.ts }}</span>
                         </div>
-                        <div>{{ alert.msg }}</div>
+                        <div style="font-size: 1rem;">
+                            {{ alert.msg }}
+                        </div>
                     </div>
                     {% endfor %}
                 {% else %}
