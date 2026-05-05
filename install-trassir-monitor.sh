@@ -779,17 +779,38 @@ def collect():
                     alerts_list.append(("warning", f"Архив: {health['arch']:.1f} дн"))
                 
                 for level, message in alerts_list:
-                    existing = conn.execute(
-                        "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ack = 0",
-                        (server_id, message)
-                    ).fetchone()
-                    
-                    if not existing:
-                        conn.execute(
-                            "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
-                            (server_id, level, message)
-                        )
-                        conn.commit()  # ← ВАЖНО! Сохраняем алерт сразу
+                    # Для алертов камер — проверяем по маске, чтобы не дублировать
+                    if message.startswith("Камер офлайн"):
+                        existing = conn.execute(
+                            "SELECT id FROM alerts WHERE server_id = ? AND msg LIKE 'Камер офлайн%' AND ack = 0",
+                            (server_id,)
+                        ).fetchone()
+                        if existing:
+                            # Обновляем текст (имена камер могли измениться)
+                            conn.execute(
+                                "UPDATE alerts SET msg = ?, ts = datetime('now', '+3 hours') WHERE id = ?",
+                                (message, existing["id"])
+                            )
+                            conn.commit()
+                        else:
+                            conn.execute(
+                                "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
+                                (server_id, level, message)
+                            )
+                            conn.commit()
+                    else:
+                        # Для остальных — проверка по полному совпадению
+                        existing = conn.execute(
+                            "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ack = 0",
+                            (server_id, message)
+                        ).fetchone()
+                        
+                        if not existing:
+                            conn.execute(
+                                "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
+                                (server_id, level, message)
+                            )
+                            conn.commit()
                 
                 # ============================================
                 # ДАННЫЕ ДЛЯ WEBSOCKET
