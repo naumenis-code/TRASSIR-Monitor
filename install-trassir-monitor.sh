@@ -779,19 +779,23 @@ def collect():
                     alerts_list.append(("warning", f"Архив: {health['arch']:.1f} дн"))
                 
                 for level, message in alerts_list:
-                    # Для алертов камер — проверяем по маске, чтобы не дублировать
                     if message.startswith("Камер офлайн"):
                         existing = conn.execute(
-                            "SELECT id FROM alerts WHERE server_id = ? AND msg LIKE 'Камер офлайн%' AND ack = 0",
+                            "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'Камер офлайн%' AND ack = 0",
                             (server_id,)
                         ).fetchone()
                         if existing:
-                            # Обновляем текст (имена камер могли измениться)
-                            conn.execute(
-                                "UPDATE alerts SET msg = ?, ts = datetime('now', '+3 hours') WHERE id = ?",
-                                (message, existing["id"])
-                            )
-                            conn.commit()
+                            if existing["msg"] != message:
+                                conn.execute(
+                                    "UPDATE alerts SET msg = ?, ts = datetime('now', '+3 hours') WHERE id = ?",
+                                    (message, existing["id"])
+                                )
+                                conn.commit()
+                                conn.execute(
+                                    "DELETE FROM telegram_logs WHERE alert_key = ?",
+                                    (str(existing["id"]),)
+                                )
+                                conn.commit()
                         else:
                             conn.execute(
                                 "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
@@ -799,7 +803,6 @@ def collect():
                             )
                             conn.commit()
                     else:
-                        # Для остальных — проверка по полному совпадению
                         existing = conn.execute(
                             "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ack = 0",
                             (server_id, message)
@@ -811,7 +814,7 @@ def collect():
                                 (server_id, level, message)
                             )
                             conn.commit()
-                
+                                            
                 # ============================================
                 # ДАННЫЕ ДЛЯ WEBSOCKET
                 # ============================================
