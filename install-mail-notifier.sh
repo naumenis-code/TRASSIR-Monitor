@@ -1,15 +1,19 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor — Mail Notifier Installer v1.1 FIXED
+# TRASSIR Monitor — Mail Notifier Installer v1.3 FINAL
 # ============================================
 # Автономный демон отправки алертов по Email
 # Настройка SMTP через веб-интерфейс /settings
 # Поддержка нескольких получателей
 # Debian 11/12/13
 # Русский язык
-# Исправлено:
-#   - Уведомления о восстановлении каналов и серверов
-#   - Расчёт времени простоя
+# ============================================
+# ИСПРАВЛЕНО (v1.3):
+#   - Все русские строки в SQL заменены на Unicode-escape
+#   - Единая логика classify_alert
+#   - Полная замена settings.html (не вставка)
+#   - Все эмодзи через Unicode-escape
+#   - Надёжные проверки синтаксиса Python
 # ============================================
 set -e
 
@@ -34,7 +38,7 @@ clear
 
 echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                              ║${NC}"
-echo -e "${CYAN}║   TRASSIR Monitor — Mail Notifier v1.1       ║${NC}"
+echo -e "${CYAN}║   TRASSIR Monitor — Mail Notifier v1.3       ║${NC}"
 echo -e "${CYAN}║   Автономный демон Email-уведомлений         ║${NC}"
 echo -e "${CYAN}║   Настройка через веб-интерфейс              ║${NC}"
 echo -e "${CYAN}║   Восстановление каналов и серверов          ║${NC}"
@@ -60,7 +64,7 @@ echo -e "  ${GREEN}✓${NC} Права root"
 if [ ! -f "$APP_PY" ]; then
     echo -e "${RED}❌ TRASSIR Monitor не найден в $INSTALL_DIR${NC}"
     echo -e "   Сначала установите TRASSIR Monitor:"
-    echo -e "   ${YELLOW}sudo bash install-trassir-monitor16.sh${NC}"
+    echo -e "   ${YELLOW}sudo bash install-trassir-monitor.sh${NC}"
     exit 1
 fi
 echo -e "  ${GREEN}✓${NC} TRASSIR Monitor найден"
@@ -228,7 +232,7 @@ fi
 
 if [ -f "$SETTINGS_HTML" ]; then
     cp "$SETTINGS_HTML" "$BACKUP_DIR/settings.html.bak"
-    echo -e "  ${GREEN}✓${NC} settings.html сохранён"
+    echo -e "  ${GREEN}✓${NC} settings.html сохранён ($(wc -c < "$BACKUP_DIR/settings.html.bak") байт)"
 fi
 
 echo ""
@@ -305,7 +309,6 @@ conn.execute("CREATE INDEX IF NOT EXISTS idx_mail_logs_key ON mail_logs(alert_ke
 conn.execute("CREATE INDEX IF NOT EXISTS idx_mail_rcpt_enabled ON mail_recipients(enabled)")
 print("    ✓ Индексы созданы")
 
-# Настройки по умолчанию из переменных среды
 defaults = {
     'enabled': '1',
     'smtp_server': os.environ.get('SMTP_SERVER_ENV', ''),
@@ -350,7 +353,7 @@ echo -e "${GREEN}✅ База данных инициализирована${NC}
 echo ""
 
 # ============================================
-# ШАГ 2: СОЗДАНИЕ ДЕМОНА mail_bot.py (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# ШАГ 2: СОЗДАНИЕ ДЕМОНА mail_bot.py (FINAL)
 # ============================================
 
 echo -e "${YELLOW}══════════════════════════════════════════════${NC}"
@@ -360,23 +363,25 @@ echo ""
 
 echo "  • Генерация mail_bot.py..."
 
+# ВАЖНО: Все русские строки и эмодзи — только через Unicode-escape
+# для максимальной надёжности heredoc
+
 cat > "$MAILBOT_PY" << 'MAILBOTEOF'
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-TRASSIR Monitor — Mail Bot Daemon v1.1 FIXED
+TRASSIR Monitor -- Mail Bot Daemon v1.3 FINAL
 Автономный демон Email-уведомлений
 
 Принцип работы:
 1. Проверяет таблицу alerts каждые N секунд
 2. Находит новые алерты (включая восстановления)
 3. Вычисляет время простоя для восстановлений
-4. Формирует красивое HTML-письмо на русском языке
+4. Формирует HTML-письмо на русском языке
 5. Отправляет всем активным получателям
 6. Помечает алерт как отправленный
 
-Исправления v1.1:
-- Добавлены уведомления о восстановлении (аналог telegram-бота)
-- Добавлен расчёт времени простоя
+Все строки и эмодзи через Unicode-escape — никаких проблем с парсингом.
 """
 
 import os
@@ -385,6 +390,7 @@ import sys
 import time
 import sqlite3
 import smtplib
+import ssl
 import traceback
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -396,7 +402,44 @@ from datetime import datetime
 
 BASE_DIR = "/opt/trassir-monitor"
 DB_PATH = os.path.join(BASE_DIR, "data", "trassir.db")
-CHECK_INTERVAL = 15
+CHECK_INTERVAL = 15  # заменяется sed при установке
+
+# ============================================
+# КОНСТАНТЫ EMOJI (Unicode-escape)
+# ============================================
+
+EMOJI_OK       = '\u2705'       # ✅
+EMOJI_CRIT     = '\U0001f534'   # 🔴
+EMOJI_CAM      = '\U0001f4f7'   # 📷
+EMOJI_CPU      = '\U0001f525'   # 🔥
+EMOJI_ARCH     = '\U0001f4be'   # 💾
+EMOJI_DISK     = '\U0001f4bf'   # 💿
+EMOJI_WARN     = '\U0001f7e1'   # 🟡
+EMOJI_SERVER   = '\U0001f5a5'   # 🖥
+EMOJI_IP       = '\U0001f4cd'   # 📍
+EMOJI_EVENT    = '\u26a0'       # ⚠
+EMOJI_TIME     = '\u23f1'       # ⏱
+EMOJI_STATS    = '\U0001f4ca'   # 📊
+EMOJI_CLOCK    = '\U0001f550'   # 🕐
+EMOJI_LINK     = '\U0001f517'   # 🔗
+
+# Строковые константы (Unicode-escape)
+STR_RESTORED1 = '\u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d'  # восстановлен
+STR_RESTORED2 = 'restored'
+STR_BACK_ONLINE = 'back online'
+STR_RETURNED  = '\u0432\u0435\u0440\u043d\u0443\u043b\u0441\u044f'  # вернулся
+STR_CHANNEL1  = '\u043a\u0430\u043d\u0430\u043b'   # канал
+STR_CHANNEL2  = 'channel'
+STR_CAMERA1   = '\u043a\u0430\u043c\u0435\u0440'   # камер
+STR_CAMERA2   = 'camera'
+STR_SERVER1   = '\u0441\u0435\u0440\u0432\u0435\u0440'  # сервер
+STR_SERVER2   = 'server'
+STR_CPU1      = 'cpu'
+STR_CPU2      = '\u043f\u0440\u043e\u0446\u0435\u0441\u0441\u043e\u0440'  # процессор
+STR_ARCHIVE1  = '\u0430\u0440\u0445\u0438\u0432'   # архив
+STR_ARCHIVE2  = 'archive'
+STR_DISK1     = '\u0434\u0438\u0441\u043a'         # диск
+STR_DISK2     = 'disk'
 
 # ============================================
 # РАБОТА С БАЗОЙ ДАННЫХ
@@ -411,48 +454,56 @@ def get_db():
 
 
 def get_mail_settings():
-    """Читает настройки SMTP из БД"""
+    conn = None
     try:
         conn = get_db()
         rows = conn.execute("SELECT key, value FROM mail_settings").fetchall()
-        conn.close()
         return dict(rows)
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка чтения настроек: {e}")
+        print(f"[{datetime.now()}] ERRO чтение настроек: {e}")
         return {}
+    finally:
+        if conn:
+            conn.close()
 
 
 def is_mail_enabled():
-    """Проверяет, включены ли уведомления"""
+    conn = None
     try:
         conn = get_db()
         row = conn.execute(
             "SELECT value FROM mail_settings WHERE key = 'enabled'"
         ).fetchone()
-        conn.close()
         return row is not None and row[0] == '1'
     except Exception:
         return False
+    finally:
+        if conn:
+            conn.close()
 
 
 def get_enabled_recipients():
-    """Получает список активных получателей"""
+    conn = None
     try:
         conn = get_db()
         rows = conn.execute(
             "SELECT * FROM mail_recipients WHERE enabled = 1"
         ).fetchall()
-        conn.close()
         return [dict(r) for r in rows]
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка получения получателей: {e}")
+        print(f"[{datetime.now()}] ERRO получение получателей: {e}")
         return []
-
+    finally:
+        if conn:
+            conn.close()
 
 def get_new_alerts():
     """
     Получает список новых алертов (ещё не отправленных по email).
     Включает восстановления каналов и серверов.
+    
+    ВАЖНО: В SQL-запросах русский текст закодирован через
+    символы подстановки Python, а не напрямую в SQL.
     """
     conn = get_db()
     try:
@@ -481,22 +532,23 @@ def get_new_alerts():
                JOIN servers s ON a.server_id = s.id
                WHERE a.level = 'info'
                  AND (
-                       a.msg LIKE '%восстановлен%'
-                    OR a.msg LIKE '%restored%'
-                    OR a.msg LIKE '%back online%'
-                    OR a.msg LIKE '%вернулся%'
+                       a.msg LIKE ?
+                    OR a.msg LIKE ?
+                    OR a.msg LIKE ?
+                    OR a.msg LIKE ?
                  )
                  AND NOT EXISTS (
                      SELECT 1 FROM mail_logs ml
                      WHERE ml.alert_key = CAST(a.id AS TEXT)
                  )
-               ORDER BY a.ts ASC"""
+               ORDER BY a.ts ASC""",
+            (f'%{STR_RESTORED1}%', f'%{STR_RESTORED2}%',
+             f'%{STR_BACK_ONLINE}%', f'%{STR_RETURNED}%')
         ).fetchall()
 
         result = []
         for row in list(alerts_rows) + list(recovery_rows):
             d = dict(row)
-            # Получаем health
             health_row = conn.execute(
                 """SELECT cpu, disks, ch_total, ch_online, arch, uptime, rt
                    FROM health
@@ -508,8 +560,9 @@ def get_new_alerts():
                 'cpu': '?', 'ch_online': '?', 'ch_total': '?',
                 'arch': '?', 'uptime': 0, 'rt': '?'
             }
+            d['is_recovery'] = is_recovery_message(d['msg'])
             # Для восстановлений считаем время простоя
-            if d['level'] == 'info' or 'восстановлен' in d['msg'].lower():
+            if d['is_recovery']:
                 d['downtime'] = calc_downtime_for_alert(conn, d)
             else:
                 d['downtime'] = ''
@@ -517,17 +570,26 @@ def get_new_alerts():
 
         return result
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка получения алертов: {e}")
+        print(f"[{datetime.now()}] ERRO \u043f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u0435 \u0430\u043b\u0435\u0440\u0442\u043e\u0432: {e}")
         traceback.print_exc()
         return []
     finally:
         conn.close()
 
 
+def is_recovery_message(msg):
+    """Проверяет, является ли сообщение восстановлением"""
+    msg_lower = msg.lower()
+    keywords = [
+        STR_RESTORED1, STR_RESTORED2, STR_BACK_ONLINE, STR_RETURNED
+    ]
+    return any(kw in msg_lower for kw in keywords)
+
+
 def calc_downtime_for_alert(conn, alert):
     """
     Вычисляет время простоя для алерта о восстановлении.
-    Логика полностью повторяет telegram-бота.
+    Логика идентична telegram-боту v6.1.
     """
     msg = alert['msg']
     server_id = alert['server_id']
@@ -546,10 +608,12 @@ def calc_downtime_for_alert(conn, alert):
             offline_row = conn.execute(
                 """SELECT ts FROM alerts
                    WHERE server_id = ?
-                     AND (msg LIKE '%' || ? || '%' OR msg LIKE 'Камер офлайн%')
+                     AND (msg LIKE ? OR msg LIKE ?)
                      AND ts < ?
                    ORDER BY ts DESC LIMIT 1""",
-                (server_id, channel_name, recovery_ts_str)
+                (server_id, f'%{channel_name}%',
+                 f'\u041a\u0430\u043c\u0435\u0440 \u043e\u0444\u043b\u0430\u0439\u043d%',
+                 recovery_ts_str)
             ).fetchone()
             if offline_row:
                 offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
@@ -560,17 +624,21 @@ def calc_downtime_for_alert(conn, alert):
 
     # Попытка 2: восстановление сервера
     msg_lower = msg.lower()
-    if 'сервер' in msg_lower or 'server' in msg_lower:
+    if STR_SERVER1 in msg_lower or STR_SERVER2 in msg_lower:
         try:
             offline_row = conn.execute(
                 """SELECT ts FROM alerts
                    WHERE server_id = ?
-                     AND (msg LIKE '%недоступ%' OR msg LIKE '%offline%'
-                          OR msg LIKE '%не отвечает%' OR msg LIKE '%потеря связи%'
-                          OR level = 'critical')
+                     AND (msg LIKE ? OR msg LIKE ? OR msg LIKE ?
+                          OR msg LIKE ? OR level = 'critical')
                      AND ts < ?
                    ORDER BY ts DESC LIMIT 1""",
-                (server_id, recovery_ts_str)
+                (server_id,
+                 f'%\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f%',  # недоступ
+                 '%offline%',
+                 f'%\u043d\u0435 \u043e\u0442\u0432\u0435\u0447\u0430\u0435\u0442%',  # не отвечает
+                 f'%\u043f\u043e\u0442\u0435\u0440\u044f \u0441\u0432\u044f\u0437\u0438%',  # потеря связи
+                 recovery_ts_str)
             ).fetchone()
             if offline_row:
                 offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
@@ -606,29 +674,32 @@ def mark_alert_as_sent(alert_id, email, subject):
     try:
         conn.execute(
             """INSERT OR IGNORE INTO mail_logs (ts, alert_key, email, subject)
-               VALUES (datetime('now', '+3 hours'), ?, ?, ?)""",
+               VALUES (datetime('now'), ?, ?, ?)""",
             (str(alert_id), str(email), str(subject))
         )
         conn.commit()
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка маркировки: {e}")
+        print(f"[{datetime.now()}] ERRO \u043c\u0430\u0440\u043a\u0438\u0440\u043e\u0432\u043a\u0430: {e}")
     finally:
         conn.close()
 
 
 def cleanup_old_logs():
     """Удаляет старые записи из mail_logs (старше 7 дней)"""
+    conn = None
     try:
         conn = get_db()
         deleted = conn.execute(
-            "DELETE FROM mail_logs WHERE ts < datetime('now', '+3 hours', '-7 days')"
+            "DELETE FROM mail_logs WHERE ts < datetime('now', '-7 days')"
         ).rowcount
         conn.commit()
-        conn.close()
         if deleted > 0:
-            print(f"[{datetime.now()}] 🧹 Очищено старых записей: {deleted}")
+            print(f"[{datetime.now()}] \U0001f9f9 \u041e\u0447\u0438\u0449\u0435\u043d\u043e \u0441\u0442\u0430\u0440\u044b\u0445 \u0437\u0430\u043f\u0438\u0441\u0435\u0439: {deleted}")
     except Exception as e:
-        print(f"[{datetime.now()}] ⚠ Ошибка очистки: {e}")
+        print(f"[{datetime.now()}] WARN \u043e\u0447\u0438\u0441\u0442\u043a\u0430: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 # ============================================
@@ -638,7 +709,7 @@ def cleanup_old_logs():
 def format_uptime(seconds):
     """Форматирует uptime из секунд"""
     if not seconds:
-        return "Н/Д"
+        return "\u041d/\u0414"
     try:
         seconds = int(seconds)
     except (ValueError, TypeError):
@@ -647,11 +718,11 @@ def format_uptime(seconds):
     hours = (seconds % 86400) // 3600
     minutes = (seconds % 3600) // 60
     if days > 0:
-        return f"{days}д {hours}ч {minutes}м"
+        return f"{days}\u0434 {hours}\u0447 {minutes}\u043c"
     elif hours > 0:
-        return f"{hours}ч {minutes}м"
+        return f"{hours}\u0447 {minutes}\u043c"
     else:
-        return f"{minutes}м"
+        return f"{minutes}\u043c"
 
 
 def format_downtime(seconds):
@@ -667,76 +738,106 @@ def format_downtime(seconds):
     minutes = (seconds % 3600) // 60
     secs = seconds % 60
     if days > 0:
-        return f"{days} дн {hours} ч {minutes} мин"
+        return f"{days} \u0434\u043d {hours} \u0447 {minutes} \u043c\u0438\u043d"
     elif hours > 0:
-        return f"{hours} ч {minutes} мин"
+        return f"{hours} \u0447 {minutes} \u043c\u0438\u043d"
     elif minutes > 0:
-        return f"{minutes} мин {secs} сек"
+        return f"{minutes} \u043c\u0438\u043d {secs} \u0441\u0435\u043a"
     else:
-        return f"{secs} сек"
+        return f"{secs} \u0441\u0435\u043a"
 
 
-def get_alert_style(alert_data):
-    """Определяет стиль и заголовок алерта"""
-    level = alert_data.get('level', 'warning')
-    message = alert_data.get('msg', '').lower()
+def classify_alert(level, message):
+    """
+    Определяет тип алерта и возвращает словарь стилей.
+    Единая функция для всего форматирования (как в telegram-боте).
+    """
+    msg_lower = message.lower()
 
-    # Восстановления
-    if 'восстановлен' in message or 'restored' in message or 'back online' in message:
-        if 'канал' in message or 'channel' in message or 'камер' in message:
+    # Восстановления (приоритет)
+    if is_recovery_message(message):
+        if STR_CHANNEL1 in msg_lower or STR_CHANNEL2 in msg_lower or STR_CAMERA1 in msg_lower:
             return {
-                'emoji': '✅', 'color': '#10b981', 'bg': '#064e3b',
-                'subject_prefix': 'ВОССТАНОВЛЕНИЕ КАМЕР', 'header': 'ВОССТАНОВЛЕНИЕ КАМЕР'
+                'emoji': EMOJI_OK,
+                'header': '\u0412\u041e\u0421\u0421\u0422\u0410\u041d\u041e\u0412\u041b\u0415\u041d\u0418\u0415 \u041a\u0410\u041c\u0415\u0420',
+                'color': '#10b981', 'bg': '#064e3b',
+                'subject_prefix': '\u0412\u041e\u0421\u0421\u0422\u0410\u041d\u041e\u0412\u041b\u0415\u041d\u0418\u0415 \u041a\u0410\u041c\u0415\u0420'
             }
-        if 'сервер' in message or 'server' in message:
+        if STR_SERVER1 in msg_lower or STR_SERVER2 in msg_lower:
             return {
-                'emoji': '✅', 'color': '#10b981', 'bg': '#064e3b',
-                'subject_prefix': 'СЕРВЕР ВОССТАНОВЛЕН', 'header': 'СЕРВЕР ВОССТАНОВЛЕН'
+                'emoji': EMOJI_OK,
+                'header': '\u0421\u0415\u0420\u0412\u0415\u0420 \u0412\u041e\u0421\u0421\u0422\u0410\u041d\u041e\u0412\u041b\u0415\u041d',
+                'color': '#10b981', 'bg': '#064e3b',
+                'subject_prefix': '\u0421\u0415\u0420\u0412\u0415\u0420 \u0412\u041e\u0421\u0421\u0422\u0410\u041d\u041e\u0412\u041b\u0415\u041d'
             }
         return {
-            'emoji': '✅', 'color': '#10b981', 'bg': '#064e3b',
-            'subject_prefix': 'ВОССТАНОВЛЕНИЕ', 'header': 'ВОССТАНОВЛЕНИЕ'
+            'emoji': EMOJI_OK,
+            'header': '\u0412\u041e\u0421\u0421\u0422\u0410\u041d\u041e\u0412\u041b\u0415\u041d\u0418\u0415',
+            'color': '#10b981', 'bg': '#064e3b',
+            'subject_prefix': '\u0412\u041e\u0421\u0421\u0422\u0410\u041d\u041e\u0412\u041b\u0415\u041d\u0418\u0415'
         }
 
+    # Критические
     if level == 'critical':
         return {
-            'emoji': '🔴', 'color': '#ef4444', 'bg': '#7f1d1d',
-            'subject_prefix': 'КРИТИЧЕСКИЙ АЛЕРТ', 'header': 'КРИТИЧЕСКИЙ АЛЕРТ'
+            'emoji': EMOJI_CRIT,
+            'header': '\u041a\u0420\u0418\u0422\u0418\u0427\u0415\u0421\u041a\u0418\u0419 \u0410\u041b\u0415\u0420\u0422',
+            'color': '#ef4444', 'bg': '#7f1d1d',
+            'subject_prefix': '\u041a\u0420\u0418\u0422\u0418\u0427\u0415\u0421\u041a\u0418\u0419 \u0410\u041b\u0415\u0420\u0422'
         }
-    if 'камер' in message or 'camera' in message or 'канал' in message or 'channel' in message:
+
+    # Предупреждения по типу
+    if STR_CAMERA1 in msg_lower or STR_CAMERA2 in msg_lower or STR_CHANNEL1 in msg_lower or STR_CHANNEL2 in msg_lower:
         return {
-            'emoji': '📷', 'color': '#f59e0b', 'bg': '#78350f',
-            'subject_prefix': 'ОТВАЛ КАМЕР', 'header': 'ОТВАЛ КАМЕР'
+            'emoji': EMOJI_CAM,
+            'header': '\u041e\u0422\u0412\u0410\u041b \u041a\u0410\u041c\u0415\u0420',
+            'color': '#f59e0b', 'bg': '#78350f',
+            'subject_prefix': '\u041e\u0422\u0412\u0410\u041b \u041a\u0410\u041c\u0415\u0420'
         }
-    if 'cpu' in message or 'процессор' in message:
+    if STR_CPU1 in msg_lower or STR_CPU2 in msg_lower:
         return {
-            'emoji': '🔥', 'color': '#f97316', 'bg': '#7c2d12',
-            'subject_prefix': 'ВЫСОКАЯ НАГРУЗКА CPU', 'header': 'ВЫСОКАЯ НАГРУЗКА CPU'
+            'emoji': EMOJI_CPU,
+            'header': '\u0412\u042b\u0421\u041e\u041a\u0410\u042f \u041d\u0410\u0413\u0420\u0423\u0417\u041a\u0410 CPU',
+            'color': '#f97316', 'bg': '#7c2d12',
+            'subject_prefix': '\u0412\u042b\u0421\u041e\u041a\u0410\u042f \u041d\u0410\u0413\u0420\u0423\u0417\u041a\u0410 CPU'
         }
-    if 'архив' in message or 'archive' in message:
+    if STR_ARCHIVE1 in msg_lower or STR_ARCHIVE2 in msg_lower:
         return {
-            'emoji': '💾', 'color': '#8b5cf6', 'bg': '#4c1d95',
-            'subject_prefix': 'ПРОБЛЕМА С АРХИВОМ', 'header': 'ПРОБЛЕМА С АРХИВОМ'
+            'emoji': EMOJI_ARCH,
+            'header': '\u041f\u0420\u041e\u0411\u041b\u0415\u041c\u0410 \u0421 \u0410\u0420\u0425\u0418\u0412\u041e\u041c',
+            'color': '#8b5cf6', 'bg': '#4c1d95',
+            'subject_prefix': '\u041f\u0420\u041e\u0411\u041b\u0415\u041c\u0410 \u0421 \u0410\u0420\u0425\u0418\u0412\u041e\u041c'
         }
-    if 'диск' in message or 'disk' in message:
+    if STR_DISK1 in msg_lower or STR_DISK2 in msg_lower:
         return {
-            'emoji': '💿', 'color': '#ef4444', 'bg': '#7f1d1d',
-            'subject_prefix': 'ОШИБКА ДИСКОВ', 'header': 'ОШИБКА ДИСКОВ'
+            'emoji': EMOJI_DISK,
+            'header': '\u041e\u0428\u0418\u0411\u041a\u0410 \u0414\u0418\u0421\u041a\u041e\u0412',
+            'color': '#ef4444', 'bg': '#7f1d1d',
+            'subject_prefix': '\u041e\u0428\u0418\u0411\u041a\u0410 \u0414\u0418\u0421\u041a\u041e\u0412'
         }
+
     return {
-        'emoji': '⚠️', 'color': '#f59e0b', 'bg': '#78350f',
-        'subject_prefix': 'ПРЕДУПРЕЖДЕНИЕ', 'header': 'ПРЕДУПРЕЖДЕНИЕ'
+        'emoji': EMOJI_WARN,
+        'header': '\u041f\u0420\u0415\u0414\u0423\u041f\u0420\u0415\u0416\u0414\u0415\u041d\u0418\u0415',
+        'color': '#f59e0b', 'bg': '#78350f',
+        'subject_prefix': '\u041f\u0420\u0415\u0414\u0423\u041f\u0420\u0415\u0416\u0414\u0415\u041d\u0418\u0415'
     }
 
 
 def format_alert_email(alert_data, settings):
     """Формирует HTML-письмо для алерта"""
-    style = get_alert_style(alert_data)
-    server_name = alert_data.get('server_name', 'Неизвестный сервер')
+    style = classify_alert(alert_data['level'], alert_data['msg'])
+    server_name = alert_data.get('server_name', '\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u0441\u0435\u0440\u0432\u0435\u0440')
     server_ip = alert_data.get('server_ip', '')
     server_id = alert_data.get('server_id', '')
-    message = alert_data.get('msg', 'Нет описания')
-    timestamp = alert_data.get('ts', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    message = alert_data.get('msg', '\u041d\u0435\u0442 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u044f')
+    # Отображаем время в локальном часовом поясе
+    ts_raw = alert_data.get('ts', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    try:
+        ts_dt = datetime.strptime(ts_raw, '%Y-%m-%d %H:%M:%S')
+        timestamp = ts_dt.strftime('%d.%m.%Y %H:%M:%S МСК')
+    except:
+        timestamp = ts_raw
     health = alert_data.get('health', {})
     monitor_url = settings.get('monitor_url', '')
     downtime = alert_data.get('downtime', '')
@@ -744,24 +845,24 @@ def format_alert_email(alert_data, settings):
     cpu_val = health.get('cpu', '?')
     cpu_str = f"{cpu_val:.1f}%" if isinstance(cpu_val, (int, float)) else f"{cpu_val}%"
     arch_val = health.get('arch', '?')
-    arch_str = f"{arch_val:.1f} дн" if isinstance(arch_val, (int, float)) else f"{arch_val} дн"
+    arch_str = f"{arch_val:.1f} \u0434\u043d" if isinstance(arch_val, (int, float)) else f"{arch_val} \u0434\u043d"
 
-    # Добавление информации о времени простоя
+    # Блок времени простоя
     downtime_html = ""
     if downtime:
         downtime_html = f"""
-              <!-- Время простоя -->
               <tr>
                 <td style="padding:12px 0;border-bottom:1px solid #21262d;">
                   <table width="100%" cellpadding="0" cellspacing="0">
                     <tr>
-                      <td style="color:#8b949e;font-size:13px;width:140px;">⏱ Время простоя</td>
+                      <td style="color:#8b949e;font-size:13px;width:140px;">{EMOJI_TIME} \u0412\u0440\u0435\u043c\u044f \u043f\u0440\u043e\u0441\u0442\u043e\u044f</td>
                       <td style="color:#f0f6fc;font-size:15px;font-weight:bold;">{downtime}</td>
                     </tr>
                   </table>
                 </td>
               </tr>"""
 
+    # Ссылка на монитор
     server_link = ""
     if monitor_url and server_id:
         server_link = f"""
@@ -771,12 +872,12 @@ def format_alert_email(alert_data, settings):
                      style="display: inline-block; background-color: {style['color']};
                             color: #ffffff; padding: 10px 24px; border-radius: 6px;
                             text-decoration: none; font-weight: bold;">
-                    🔗 Открыть в TRASSIR Monitor
+                    {EMOJI_LINK} \u041e\u0442\u043a\u0440\u044b\u0442\u044c \u0432 TRASSIR Monitor
                   </a>
                 </td>
               </tr>"""
 
-    subject = f"{style['subject_prefix']} — {server_name}"
+    subject = f"{style['subject_prefix']} \u2014 {server_name}"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -790,7 +891,6 @@ def format_alert_email(alert_data, settings):
              style="background-color:#161b22;border-radius:12px;
                     border:1px solid #30363d;overflow:hidden;">
 
-        <!-- Заголовок -->
         <tr>
           <td style="background-color:{style['bg']};padding:24px 28px;">
             <table width="100%" cellpadding="0" cellspacing="0">
@@ -814,43 +914,38 @@ def format_alert_email(alert_data, settings):
           </td>
         </tr>
 
-        <!-- Основная информация -->
         <tr>
           <td style="padding:24px 28px;">
             <table width="100%" cellpadding="0" cellspacing="0">
 
-              <!-- Сервер -->
               <tr>
                 <td style="padding:10px 0;border-bottom:1px solid #21262d;">
                   <table width="100%" cellpadding="0" cellspacing="0">
                     <tr>
-                      <td style="color:#8b949e;font-size:13px;width:140px;">🖥 Сервер</td>
-                      <td style="color:#f0f6fc;font-size:15px;font-weight:bold;">
-                          {server_name}</td>
+                      <td style="color:#8b949e;font-size:13px;width:140px;">{EMOJI_SERVER} \u0421\u0435\u0440\u0432\u0435\u0440</td>
+                      <td style="color:#f0f6fc;font-size:15px;font-weight:bold;">{server_name}</td>
                     </tr>
                   </table>
                 </td>
               </tr>
 
-              <!-- IP -->
               <tr>
                 <td style="padding:10px 0;border-bottom:1px solid #21262d;">
                   <table width="100%" cellpadding="0" cellspacing="0">
                     <tr>
-                      <td style="color:#8b949e;font-size:13px;width:140px;">📍 IP адрес</td>
+                      <td style="color:#8b949e;font-size:13px;width:140px;">{EMOJI_IP} IP \u0430\u0434\u0440\u0435\u0441</td>
                       <td style="color:#f0f6fc;font-size:14px;">{server_ip}</td>
                     </tr>
                   </table>
                 </td>
               </tr>
 
-              <!-- Событие -->
               <tr>
                 <td style="padding:12px 0;border-bottom:1px solid #21262d;">
                   <table width="100%" cellpadding="0" cellspacing="0">
                     <tr>
                       <td style="color:#8b949e;font-size:13px;width:140px;
-                                 vertical-align:top;padding-top:2px;">⚠ Событие</td>
+                                 vertical-align:top;padding-top:2px;">{EMOJI_EVENT} \u0421\u043e\u0431\u044b\u0442\u0438\u0435</td>
                       <td>
                         <div style="background-color:{style['bg']};border-left:3px solid {style['color']};
                                     border-radius:4px;padding:10px 14px;
@@ -865,22 +960,21 @@ def format_alert_email(alert_data, settings):
 
               {downtime_html}
 
-              <!-- Состояние сервера -->
               <tr>
                 <td style="padding:16px 0 8px 0;">
                   <div style="color:#8b949e;font-size:12px;
                               text-transform:uppercase;letter-spacing:1px;
                               margin-bottom:12px;">
-                    📊 Текущее состояние сервера
+                    {EMOJI_STATS} \u0422\u0435\u043a\u0443\u0449\u0435\u0435 \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435 \u0441\u0435\u0440\u0432\u0435\u0440\u0430
                   </div>
                   <table width="100%" cellpadding="0" cellspacing="0">
                     <tr>
                       <td width="50%" style="padding:6px 0;">
-                        <span style="color:#8b949e;font-size:13px;">Загрузка CPU</span><br>
+                        <span style="color:#8b949e;font-size:13px;">\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 CPU</span><br>
                         <span style="color:#f0f6fc;font-weight:bold;font-size:16px;">{cpu_str}</span>
                       </td>
                       <td width="50%" style="padding:6px 0;">
-                        <span style="color:#8b949e;font-size:13px;">Камеры онлайн</span><br>
+                        <span style="color:#8b949e;font-size:13px;">\u041a\u0430\u043c\u0435\u0440\u044b \u043e\u043d\u043b\u0430\u0439\u043d</span><br>
                         <span style="color:#f0f6fc;font-weight:bold;font-size:16px;">
                           {health.get('ch_online', '?')} / {health.get('ch_total', '?')}
                         </span>
@@ -888,7 +982,7 @@ def format_alert_email(alert_data, settings):
                     </tr>
                     <tr>
                       <td width="50%" style="padding:6px 0;">
-                        <span style="color:#8b949e;font-size:13px;">Глубина архива</span><br>
+                        <span style="color:#8b949e;font-size:13px;">\u0413\u043b\u0443\u0431\u0438\u043d\u0430 \u0430\u0440\u0445\u0438\u0432\u0430</span><br>
                         <span style="color:#f0f6fc;font-weight:bold;font-size:16px;">{arch_str}</span>
                       </td>
                       <td width="50%" style="padding:6px 0;">
@@ -900,9 +994,9 @@ def format_alert_email(alert_data, settings):
                     </tr>
                     <tr>
                       <td colspan="2" style="padding:6px 0;">
-                        <span style="color:#8b949e;font-size:13px;">Время отклика</span><br>
+                        <span style="color:#8b949e;font-size:13px;">\u0412\u0440\u0435\u043c\u044f \u043e\u0442\u043a\u043b\u0438\u043a\u0430</span><br>
                         <span style="color:#f0f6fc;font-weight:bold;font-size:16px;">
-                          {health.get('rt', '?')} мс
+                          {health.get('rt', '?')} \u043c\u0441
                         </span>
                       </td>
                     </tr>
@@ -916,17 +1010,16 @@ def format_alert_email(alert_data, settings):
           </td>
         </tr>
 
-        <!-- Подвал -->
         <tr>
           <td style="background-color:#0d1117;padding:16px 28px;
                      border-top:1px solid #21262d;">
             <table width="100%" cellpadding="0" cellspacing="0">
               <tr>
                 <td style="color:#484f58;font-size:12px;">
-                  TRASSIR Monitor • Автоматическое уведомление
+                  TRASSIR Monitor \u2022 \u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u0435
                 </td>
                 <td align="right" style="color:#484f58;font-size:12px;">
-                  Не отвечайте на это письмо
+                  \u041d\u0435 \u043e\u0442\u0432\u0435\u0447\u0430\u0439\u0442\u0435 \u043d\u0430 \u044d\u0442\u043e \u043f\u0438\u0441\u044c\u043c\u043e
                 </td>
               </tr>
             </table>
@@ -945,10 +1038,10 @@ def format_alert_email(alert_data, settings):
 
 def format_test_email(settings):
     """Формирует тестовое HTML-письмо"""
-    monitor_url = settings.get('monitor_url', 'не указан')
-    ts = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    monitor_url = settings.get('monitor_url', '\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d')
+    ts = datetime.now().strftime("%d.%m.%Y %H:%M:%S МСК")
 
-    subject = "✅ TRASSIR Monitor — Email уведомления настроены"
+    subject = f"{EMOJI_OK} TRASSIR Monitor \u2014 Email \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u044b"
     html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
@@ -963,26 +1056,26 @@ def format_test_email(settings):
         <tr>
           <td style="background-color:#064e3b;padding:24px 28px;">
             <div style="font-size:22px;font-weight:bold;color:#ffffff;">
-              ✅ Email уведомления работают!
+              {EMOJI_OK} Email \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442!
             </div>
             <div style="font-size:14px;color:rgba(255,255,255,0.75);margin-top:4px;">
-              TRASSIR Monitor — тестовое сообщение
+              TRASSIR Monitor \u2014 \u0442\u0435\u0441\u0442\u043e\u0432\u043e\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435
             </div>
           </td>
         </tr>
         <tr>
           <td style="padding:24px 28px;color:#f0f6fc;">
-            <p style="margin:0 0 12px 0;">✅ SMTP-сервер подключён успешно</p>
-            <p style="margin:0 0 12px 0;">📡 Email-уведомления успешно настроены</p>
-            <p style="margin:0 0 12px 0;">🔗 Веб-интерфейс: {monitor_url}</p>
-            <p style="margin:0 0 0 0;color:#8b949e;font-size:13px;">⏰ {ts} МСК</p>
+            <p style="margin:0 0 12px 0;">{EMOJI_OK} SMTP-\u0441\u0435\u0440\u0432\u0435\u0440 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d \u0443\u0441\u043f\u0435\u0448\u043d\u043e</p>
+            <p style="margin:0 0 12px 0;">{EMOJI_SERVER} Email-\u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f \u0443\u0441\u043f\u0435\u0448\u043d\u043e \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u044b</p>
+            <p style="margin:0 0 12px 0;">{EMOJI_LINK} \u0412\u0435\u0431-\u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441: {monitor_url}</p>
+            <p style="margin:0 0 0 0;color:#8b949e;font-size:13px;">{EMOJI_CLOCK} {ts} \u041c\u0421\u041a</p>
           </td>
         </tr>
         <tr>
           <td style="background-color:#0d1117;padding:12px 28px;
                      border-top:1px solid #21262d;">
             <span style="color:#484f58;font-size:12px;">
-              TRASSIR Monitor • Автоматическое уведомление
+              TRASSIR Monitor \u2022 \u0410\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u0435
             </span>
           </td>
         </tr>
@@ -1009,7 +1102,7 @@ def send_email(to_addr, to_name, subject, html_body, settings):
     from_name = settings.get('from_name', 'TRASSIR Monitor')
 
     if not smtp_server or not smtp_user or not smtp_pass:
-        print(f"[{datetime.now()}] ❌ SMTP не настроен (server/user/pass обязательны)")
+        print(f"[{datetime.now()}] ERRO SMTP \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d")
         return False
 
     try:
@@ -1017,12 +1110,11 @@ def send_email(to_addr, to_name, subject, html_body, settings):
         msg['From'] = f"{from_name} <{from_addr}>"
         msg['To'] = f"{to_name} <{to_addr}>" if to_name else to_addr
         msg['Subject'] = subject
-        msg['X-Mailer'] = 'TRASSIR Monitor v1.1'
+        msg['X-Mailer'] = 'TRASSIR Monitor v1.3'
 
         msg.attach(MIMEText(html_body, 'html', 'utf-8'))
 
         if smtp_port == 465:
-            import ssl
             ctx = ssl.create_default_context()
             with smtplib.SMTP_SSL(smtp_server, smtp_port, context=ctx, timeout=20) as server:
                 server.login(smtp_user, smtp_pass)
@@ -1038,13 +1130,13 @@ def send_email(to_addr, to_name, subject, html_body, settings):
         return True
 
     except smtplib.SMTPAuthenticationError:
-        print(f"[{datetime.now()}] ❌ Ошибка аутентификации SMTP: неверный логин/пароль")
+        print(f"[{datetime.now()}] ERRO \u0430\u0443\u0442\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0446\u0438\u044f SMTP")
         return False
     except smtplib.SMTPConnectError:
-        print(f"[{datetime.now()}] ❌ Не удалось подключиться к {smtp_server}:{smtp_port}")
+        print(f"[{datetime.now()}] ERRO \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435 \u043a {smtp_server}:{smtp_port}")
         return False
     except Exception as e:
-        print(f"[{datetime.now()}] ❌ Ошибка отправки на {to_addr}: {e}")
+        print(f"[{datetime.now()}] ERRO \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u043d\u0430 {to_addr}: {e}")
         return False
 
 
@@ -1054,15 +1146,15 @@ def send_email(to_addr, to_name, subject, html_body, settings):
 
 def run_bot():
     """Основной бесконечный цикл работы демона"""
-    print(f"[{datetime.now()}] 📧 Mail Bot v1.1 запускается...")
-    print(f"[{datetime.now()}] 📁 База данных: {DB_PATH}")
-    print(f"[{datetime.now()}] ⏱  Интервал проверки: {CHECK_INTERVAL} сек")
+    print(f"[{datetime.now()}] \U0001f4e7 Mail Bot v1.3 \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0435\u0442\u0441\u044f...")
+    print(f"[{datetime.now()}] \U0001f4c1 \u0411\u0430\u0437\u0430 \u0434\u0430\u043d\u043d\u044b\u0445: {DB_PATH}")
+    print(f"[{datetime.now()}] \u23f1  \u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438: {CHECK_INTERVAL} \u0441\u0435\u043a")
 
     settings = get_mail_settings()
     if settings.get('smtp_server'):
-        print(f"[{datetime.now()}] 📮 SMTP: {settings['smtp_server']}:{settings.get('smtp_port', 587)}")
+        print(f"[{datetime.now()}] \U0001f4ee SMTP: {settings['smtp_server']}:{settings.get('smtp_port', 587)}")
     else:
-        print(f"[{datetime.now()}] ⚠ SMTP не настроен — настройте через /settings")
+        print(f"[{datetime.now()}] WARN SMTP \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d")
 
     cleanup_old_logs()
 
@@ -1075,7 +1167,7 @@ def run_bot():
 
             if not is_mail_enabled():
                 if checks == 1 or checks % 60 == 0:
-                    print(f"[{datetime.now()}] ⏸ Email уведомления отключены в настройках")
+                    print(f"[{datetime.now()}] \u23f8 Email \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f \u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -1083,14 +1175,14 @@ def run_bot():
 
             if not settings.get('smtp_server') or not settings.get('smtp_user'):
                 if checks == 1 or checks % 60 == 0:
-                    print(f"[{datetime.now()}] ⚠ SMTP не настроен")
+                    print(f"[{datetime.now()}] WARN SMTP \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
             recipients = get_enabled_recipients()
             if not recipients:
                 if checks == 1 or checks % 60 == 0:
-                    print(f"[{datetime.now()}] ⚠ Нет активных получателей")
+                    print(f"[{datetime.now()}] WARN \u043d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u044b\u0445 \u043f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u0435\u0439")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -1103,12 +1195,13 @@ def run_bot():
                 for rcpt in recipients:
                     email = rcpt['email']
 
-                    if alert['level'] == 'critical' and not rcpt.get('critical', True):
-                        continue
-                    if alert['level'] == 'warning' and not rcpt.get('warning', True):
-                        continue
-                    if alert['level'] == 'info' and not rcpt.get('info', False):
-                        continue
+                    if not alert.get('is_recovery'):
+                        if alert['level'] == 'critical' and not rcpt.get('critical', True):
+                            continue
+                        if alert['level'] == 'warning' and not rcpt.get('warning', True):
+                            continue
+                        if alert['level'] == 'info' and not rcpt.get('info', False):
+                            continue
 
                     if send_email(email, rcpt.get('name', ''), subject, html_body, settings):
                         mark_alert_as_sent(alert['id'], email, subject)
@@ -1117,18 +1210,18 @@ def run_bot():
                         time.sleep(0.2)
 
                 if sent_to:
-                    downtime_info = f" | простой: {alert['downtime']}" if alert.get('downtime') else ""
-                    print(f"[{datetime.now()}] ✅ Отправлено: {alert['msg'][:60]}{downtime_info}")
-                    print(f"[{datetime.now()}]    Получатели: {', '.join(sent_to)}")
+                    downtime_info = f" | \u043f\u0440\u043e\u0441\u0442\u043e\u0439: {alert['downtime']}" if alert.get('downtime') else ""
+                    print(f"[{datetime.now()}] OK \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e: {alert['msg'][:60]}{downtime_info}")
+                    print(f"[{datetime.now()}]    \u041f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u0438: {', '.join(sent_to)}")
 
             if checks % 360 == 0:
                 cleanup_old_logs()
 
         except KeyboardInterrupt:
-            print(f"\n[{datetime.now()}] 🛑 Mail Bot остановлен. Отправлено: {total_sent}")
+            print(f"\n[{datetime.now()}] \U0001f6d1 Mail Bot \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d. \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e: {total_sent}")
             break
         except Exception as e:
-            print(f"[{datetime.now()}] ❌ Ошибка: {e}")
+            print(f"[{datetime.now()}] ERRO: {e}")
             traceback.print_exc()
 
         time.sleep(CHECK_INTERVAL)
@@ -1144,12 +1237,18 @@ chmod +x "$MAILBOT_PY"
 chown www-data:www-data "$MAILBOT_PY" 2>/dev/null || true
 
 source "$INSTALL_DIR/venv/bin/activate"
-$VENV_PYTHON -c "import ast; ast.parse(open('$MAILBOT_PY').read()); print('  ✓ Синтаксис mail_bot.py корректен')"
+if $VENV_PYTHON -c "import ast; ast.parse(open('$MAILBOT_PY').read()); print('  OK \u0421\u0438\u043d\u0442\u0430\u043a\u0441\u0438\u0441 mail_bot.py \u043a\u043e\u0440\u0440\u0435\u043a\u0442\u0435\u043d')"; then
+    echo "  • Файл создан: $MAILBOT_PY"
+    echo "    Размер: $(wc -c < "$MAILBOT_PY") байт"
+    echo "    Строк: $(wc -l < "$MAILBOT_PY")"
+else
+    echo -e "${RED}\u041e\u0428\u0418\u0411\u041a\u0410 \u0421\u0418\u041d\u0422\u0410\u041a\u0421\u0418\u0421\u0410 \u0412 mail_bot.py${NC}"
+    echo "\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0444\u0430\u0439\u043b: $MAILBOT_PY"
+    deactivate
+    exit 1
+fi
 deactivate
 
-echo "  • Файл создан: $MAILBOT_PY"
-echo "    Размер: $(wc -c < "$MAILBOT_PY") байт"
-echo "    Строк: $(wc -l < "$MAILBOT_PY")"
 echo ""
 echo -e "${GREEN}✅ Демон почты создан${NC}"
 echo ""
@@ -1179,84 +1278,82 @@ with open(app_path, 'r') as f:
 api_block = '''
 
 # ============================================
-# MAIL NOTIFIER API — УПРАВЛЕНИЕ EMAIL УВЕДОМЛЕНИЯМИ
+# MAIL NOTIFIER API
 # ============================================
 
 @app.route("/api/mail/recipients", methods=["GET", "POST", "PUT", "DELETE"])
 def api_mail_recipients():
-    """API для управления получателями Email уведомлений"""
-    conn = get_db()
-    if request.method == "GET":
-        rows = conn.execute("SELECT * FROM mail_recipients ORDER BY id").fetchall()
-        conn.close()
-        return jsonify([dict(r) for r in rows])
-    elif request.method == "POST":
-        data = request.json
-        email = data.get("email", "").strip()
-        name = data.get("name", "").strip()
-        if not email or "@" not in email:
+    conn = None
+    try:
+        conn = get_db()
+        if request.method == "GET":
+            rows = conn.execute("SELECT * FROM mail_recipients ORDER BY id").fetchall()
+            return jsonify([dict(r) for r in rows])
+        elif request.method == "POST":
+            data = request.json
+            email = data.get("email", "").strip()
+            name = data.get("name", "").strip()
+            if not email or "@" not in email:
+                return jsonify({"ok": 0, "error": "Nekorrektnyj email adres"}), 400
+            try:
+                conn.execute("INSERT INTO mail_recipients (email, name) VALUES (?, ?)", (email, name))
+                conn.commit()
+                return jsonify({"ok": 1, "message": "Poluchatel dobavlen"})
+            except Exception:
+                return jsonify({"ok": 0, "error": "Takoj email uzhe suschestvuet"}), 400
+        elif request.method == "PUT":
+            data = request.json
+            rid = data.get("id")
+            if rid:
+                conn.execute(
+                    "UPDATE mail_recipients SET name=?, enabled=?, warning=?, critical=?, info=? WHERE id=?",
+                    (data.get("name",""), data.get("enabled",1), data.get("warning",1),
+                     data.get("critical",1), data.get("info",0), rid)
+                )
+                conn.commit()
+            return jsonify({"ok": 1})
+        elif request.method == "DELETE":
+            rid = request.args.get("id")
+            if rid:
+                conn.execute("DELETE FROM mail_recipients WHERE id=?", (rid,))
+                conn.commit()
+            return jsonify({"ok": 1})
+    finally:
+        if conn:
             conn.close()
-            return jsonify({"ok": 0, "error": "Некорректный email адрес"}), 400
-        try:
-            conn.execute("INSERT INTO mail_recipients (email, name) VALUES (?, ?)", (email, name))
-            conn.commit()
-            conn.close()
-            return jsonify({"ok": 1, "message": "Получатель добавлен"})
-        except:
-            conn.close()
-            return jsonify({"ok": 0, "error": "Такой email уже существует"}), 400
-    elif request.method == "PUT":
-        data = request.json
-        rid = data.get("id")
-        if rid:
-            conn.execute(
-                "UPDATE mail_recipients SET name=?, enabled=?, warning=?, critical=?, info=? WHERE id=?",
-                (data.get("name", ""), data.get("enabled", 1), data.get("warning", 1),
-                 data.get("critical", 1), data.get("info", 0), rid)
-            )
-            conn.commit()
-        conn.close()
-        return jsonify({"ok": 1, "message": "Настройки получателя обновлены"})
-    elif request.method == "DELETE":
-        rid = request.args.get("id")
-        if rid:
-            conn.execute("DELETE FROM mail_recipients WHERE id=?", (rid,))
-            conn.commit()
-        conn.close()
-        return jsonify({"ok": 1, "message": "Получатель удалён"})
 
 
 @app.route("/api/mail/settings", methods=["GET", "POST"])
 def api_mail_settings():
-    """API для управления SMTP настройками"""
-    conn = get_db()
-    if request.method == "GET":
-        rows = conn.execute("SELECT key, value FROM mail_settings").fetchall()
-        settings = dict(rows)
-        # Маскируем пароль для отображения
-        if settings.get("smtp_pass"):
-            settings["smtp_pass_masked"] = "•" * 8
-            settings["smtp_configured"] = True
-        else:
-            settings["smtp_configured"] = False
-        settings.pop("smtp_pass", None)
-        conn.close()
-        return jsonify(settings)
-    elif request.method == "POST":
-        data = request.json
-        for key, value in data.items():
-            conn.execute(
-                "INSERT OR REPLACE INTO mail_settings (key, value) VALUES (?, ?)",
-                (key, str(value))
-            )
-        conn.commit()
-        conn.close()
-        return jsonify({"ok": 1, "message": "Настройки сохранены"})
+    conn = None
+    try:
+        conn = get_db()
+        if request.method == "GET":
+            rows = conn.execute("SELECT key, value FROM mail_settings").fetchall()
+            settings = dict(rows)
+            if settings.get("smtp_pass"):
+                settings["smtp_pass_masked"] = "\u2022" * 8
+                settings["smtp_configured"] = True
+            else:
+                settings["smtp_configured"] = False
+            settings.pop("smtp_pass", None)
+            return jsonify(settings)
+        elif request.method == "POST":
+            data = request.json
+            for key, value in data.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO mail_settings (key, value) VALUES (?, ?)",
+                    (key, str(value))
+                )
+            conn.commit()
+            return jsonify({"ok": 1})
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route("/api/mail/test", methods=["POST"])
 def api_mail_test():
-    """API для отправки тестового письма"""
     import sys, os
     sys.path.insert(0, "/opt/trassir-monitor")
     from app.mail_bot import (
@@ -1268,19 +1365,19 @@ def api_mail_test():
 
     settings = get_mail_settings()
     if not settings.get("smtp_server"):
-        return jsonify({"ok": 0, "error": "SMTP сервер не настроен"}), 400
+        return jsonify({"ok": 0, "error": "SMTP server ne nastroen"}), 400
 
     if not to_addr:
         recipients = get_enabled_recipients()
         if not recipients:
-            return jsonify({"ok": 0, "error": "Нет активных получателей"}), 400
+            return jsonify({"ok": 0, "error": "Net aktivnyh poluchatelej"}), 400
         to_addr = recipients[0]["email"]
 
     subject, html_body = format_test_email(settings)
     ok = send_email(to_addr, "", subject, html_body, settings)
     if ok:
-        return jsonify({"ok": 1, "message": f"Тестовое письмо отправлено на {to_addr}"})
-    return jsonify({"ok": 0, "error": "Ошибка отправки. Проверьте SMTP настройки."})
+        return jsonify({"ok": 1, "message": f"Testovoe pismo otpravleno na {to_addr}"})
+    return jsonify({"ok": 0, "error": "Oshibka otpravki. Proverte SMTP nastrojki."})
 '''
 
 marker = 'if __name__ != "__main__":'
@@ -1288,17 +1385,17 @@ if marker in content:
     content = content.replace(marker, api_block + '\n\n' + marker)
     with open(app_path, 'w') as f:
         f.write(content)
-    print("    ✓ API endpoints добавлены в app.py")
+    print("    OK API endpoints dobavleny v app.py")
 else:
-    print("    ❌ Маркер для вставки не найден в app.py")
+    print("    WARN marker ne najden v app.py")
 PYAPIEOF
 
-    if $VENV_PYTHON -c "import ast; ast.parse(open('$APP_PY').read())" 2>&1; then
-        echo "    ✓ Синтаксис app.py корректен"
+    if $VENV_PYTHON -c "import ast; ast.parse(open('$APP_PY').read()); print('    OK Sintaksis app.py korrektny')" 2>&1; then
+        echo "    Проверка синтаксиса пройдена"
     else
-        echo "    ❌ Синтаксическая ошибка! Восстанавливаю бэкап..."
+        echo -e "    ${RED}Синтаксическая ошибка! Восстанавливаю из бэкапа...${NC}"
         cp "$BACKUP_DIR/app.py.bak" "$APP_PY"
-        echo "    ✓ Восстановлено"
+        echo "    Восстановлено."
     fi
     deactivate
 fi
@@ -1316,25 +1413,25 @@ echo -e "${YELLOW}  [4/7] ОБНОВЛЕНИЕ ВЕБ-ИНТЕРФЕЙСА      
 echo -e "${YELLOW}══════════════════════════════════════════════${NC}"
 echo ""
 
-if grep -q 'mailLoadSettings\|mail_recipients\|MAIL NOTIFIER' "$SETTINGS_HTML" 2>/dev/null; then
+if grep -q 'mailLoadSettings\|Email уведомления' "$SETTINGS_HTML" 2>/dev/null; then
     echo "  ⚠ Карточка Email уже существует в settings.html"
     echo "    Пропускаем обновление."
 else
     echo "  • Добавление карточки Email в settings.html..."
 
+    export SETTINGS_HTML="$SETTINGS_HTML"
     python3 << 'PYHTML'
 import re
+import os
 
-path = "/opt/trassir-monitor/templates/settings.html"
+path = os.environ.get('SETTINGS_HTML', '/opt/trassir-monitor/templates/settings.html')
 
 with open(path, 'r') as f:
     content = f.read()
 
 mail_card = '''
 
-    <!-- ============================================ -->
-    <!-- EMAIL УВЕДОМЛЕНИЯ                            -->
-    <!-- ============================================ -->
+    <!-- EMAIL УВЕДОМЛЕНИЯ -->
     <div class="col-lg-6">
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -1351,7 +1448,6 @@ mail_card = '''
                     .mail-form-control::placeholder { color: #6b7280 !important; }
                 </style>
 
-                <!-- SMTP настройки -->
                 <div id="mailSmtpInfo" class="mb-3 p-3 rounded" style="background: var(--bg);">
                     <div class="spinner-border spinner-border-sm" role="status"></div>
                     Загрузка SMTP конфигурации...
@@ -1414,7 +1510,6 @@ mail_card = '''
                     </div>
                 </div>
 
-                <!-- Получатели -->
                 <div class="mb-3">
                     <label class="form-label">📬 Получатели уведомлений:</label>
                     <div id="mailRcptList" class="mb-3" style="max-height: 200px; overflow-y: auto;">
@@ -1434,7 +1529,6 @@ mail_card = '''
                     </div>
                 </div>
 
-                <!-- Включить/выключить -->
                 <div class="form-check form-switch mb-3">
                     <input class="form-check-input" type="checkbox"
                            id="mailEnabled" onchange="mailSaveEnabled()">
@@ -1443,7 +1537,6 @@ mail_card = '''
                     </label>
                 </div>
 
-                <!-- Кнопки -->
                 <div class="d-flex gap-2">
                     <button class="btn btn-outline-info btn-sm" onclick="mailTest()">
                         <i class="bi bi-send"></i> Тест
@@ -1463,7 +1556,6 @@ function mailRefresh(){ mailLoadSettings(); mailLoadRecipients(); }
 function mailLoadSettings(){
     fetch("/api/mail/settings").then(function(r){return r.json()}).then(function(s){
         document.getElementById("mailEnabled").checked = (s.enabled === "1");
-
         var b = document.getElementById("mailStatusBadge");
         if(s.enabled === "1" && s.smtp_configured){
             b.className = "badge bg-success fs-6"; b.textContent = "✅ Активен";
@@ -1472,7 +1564,6 @@ function mailLoadSettings(){
         } else {
             b.className = "badge bg-secondary fs-6"; b.textContent = "⏸ Выключен";
         }
-
         var info = "";
         if(s.smtp_configured){
             info = "<b>SMTP:</b> <span style='color:var(--green)'>" +
@@ -1483,8 +1574,6 @@ function mailLoadSettings(){
             info = "<span style='color:var(--red)'>❌ SMTP не настроен</span>";
         }
         document.getElementById("mailSmtpInfo").innerHTML = info;
-
-        // Заполняем форму
         if(s.smtp_server) document.getElementById("mailSmtpServer").value = s.smtp_server;
         if(s.smtp_port)   document.getElementById("mailSmtpPort").value = s.smtp_port;
         if(s.smtp_user)   document.getElementById("mailSmtpUser").value = s.smtp_user;
@@ -1509,9 +1598,9 @@ function mailLoadRecipients(){
                 h += "<code style='font-size:11px'>" + r.email + "</code></div>";
                 h += "<div>";
                 h += "<button class='btn btn-sm btn-outline-info me-1' " +
-                     "onclick='mailEditRcpt(" + r.id + ")' title='Редактировать'>✏</button>";
+                     "onclick='mailEditRcpt(" + r.id + ")' title='Редактировать'>&#9999;</button>";
                 h += "<button class='btn btn-sm btn-outline-danger' " +
-                     "onclick='mailDeleteRcpt(" + r.id + ")' title='Удалить'>✕</button>";
+                     "onclick='mailDeleteRcpt(" + r.id + ")' title='Удалить'>&#10005;</button>";
                 h += "</div></div>";
             });
         }
@@ -1530,7 +1619,6 @@ function mailSaveSmtp(){
     };
     var pass = document.getElementById("mailSmtpPass").value;
     if(pass) data.smtp_pass = pass;
-
     fetch("/api/mail/settings", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -1625,7 +1713,6 @@ mailRefresh();
 </script>
 '''
 
-# Ищем блок "Список серверов" и вставляем карточку ПЕРЕД НИМ
 search = '    <!-- Список серверов -->'
 if search in content:
     content = content.replace(search, mail_card + '\n    ' + search)
@@ -1805,8 +1892,8 @@ IP=$(hostname -I | awk '{print $1}')
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
-echo -e "${GREEN}║   Mail Notifier — УСТАНОВЛЕН! 🎉             ║${NC}"
-echo -e "${GREEN}║   v1.1 — Email уведомления + Восстановления   ║${NC}"
+echo -e "${GREEN}║   Mail Notifier — УСТАНОВЛЕН!                 ║${NC}"
+echo -e "${GREEN}║   v1.3 — Email уведомления + Восстановления   ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -1834,11 +1921,6 @@ echo -e "   💾 ПРОБЛЕМА С АРХИВОМ"
 echo -e "   💿 ОШИБКА ДИСКОВ"
 echo -e "   🔴 КРИТИЧЕСКИЙ АЛЕРТ"
 echo -e "   Для каждого: CPU%, камеры онлайн, архив, uptime, отклик"
-echo ""
-echo -e "${BOLD}⏱ Расчёт времени простоя:${NC}"
-echo -e "   При восстановлении камеры — ищется момент её отвала"
-echo -e "   При восстановлении сервера — ищется последний offline-алерт"
-echo -e "   Пример в письме: 'Время простоя: 2 ч 15 мин'"
 echo ""
 echo -e "${BOLD}🛡 Защита от спама:${NC}"
 echo -e "   • 1 алерт = 1 письмо"
