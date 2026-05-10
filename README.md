@@ -183,7 +183,7 @@ sudo trassir-monitor-uninstall
 |---|---|
 | `install-trassir-monitor.sh` | Основная установка мониторинга |
 | `install-telegram-notifier.sh` | Установка Telegram-уведомлений |
-| `install-mail-notifier.sh` | Установка Email-уведомлений (v1.3) |
+| `install-mail-notifier.sh` | Установка Email-уведомлений |
 | `uninstall-telegram-bot.sh` | Удаление Telegram-бота |
 | `uninstall-mail-notifier.sh` | Удаление Email-демона |
 
