@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor v13.0
-# Проверено на Debian 12,13
+# TRASSIR Monitor v12.0
+# Проверено на Debian 12
 # ============================================
 set -e
 
@@ -821,11 +821,14 @@ def collect():
                                     (message, existing["id"])
                                 )
                                 conn.commit()
-                                conn.execute(
-                                    "DELETE FROM telegram_logs WHERE alert_key = ?",
-                                    (str(existing["id"]),)
-                                )
-                                conn.commit()
+                                try:
+                                    conn.execute(
+                                        "DELETE FROM telegram_logs WHERE alert_key = ?",
+                                        (str(existing["id"]),)
+                                    )
+                                    conn.commit()
+                                except Exception:
+                                    pass  # таблица telegram_logs создаётся при установке telegram-нотифайера
                         else:
                             conn.execute(
                                 "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
@@ -1387,13 +1390,49 @@ echo ""
 echo -e "${YELLOW}[5/7] Создание HTML шаблонов...${NC}"
 echo ""
 
-# Скачиваем socket.io локально
-echo "  • Скачивание socket.io..."
-if curl -sL -o $INSTALL_DIR/static/socket.io.min.js \
-    https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.0/socket.io.min.js 2>/dev/null; then
-    echo "    ✓ socket.io скачан ($(wc -c < $INSTALL_DIR/static/socket.io.min.js) байт)"
-else
-    echo "    ⚠ Не удалось скачать socket.io (будет использован CDN)"
+# Скачиваем все внешние ресурсы локально для работы без интернета
+echo "  • Скачивание статических ресурсов..."
+
+mkdir -p $INSTALL_DIR/static/fonts
+
+_dl() {
+    local url="$1" dest="$2" name="$3"
+    if curl -sL --connect-timeout 15 --retry 2 -o "$dest" "$url" 2>/dev/null && [ -s "$dest" ]; then
+        echo "    ✓ $name ($(wc -c < "$dest") байт)"
+    else
+        echo "    ⚠ Не удалось скачать $name"
+    fi
+}
+
+_dl "https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.0/socket.io.min.js" \
+    "$INSTALL_DIR/static/socket.io.min.js" "socket.io"
+
+_dl "https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" \
+    "$INSTALL_DIR/static/bootstrap.min.css" "bootstrap.css"
+
+_dl "https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js" \
+    "$INSTALL_DIR/static/bootstrap.bundle.min.js" "bootstrap.js"
+
+_dl "https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js" \
+    "$INSTALL_DIR/static/chart.min.js" "chart.js"
+
+# Bootstrap Icons — CSS + шрифты
+_dl "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/bootstrap-icons.css" \
+    "$INSTALL_DIR/static/bootstrap-icons.css" "bootstrap-icons.css"
+
+_dl "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/fonts/bootstrap-icons.woff2" \
+    "$INSTALL_DIR/static/fonts/bootstrap-icons.woff2" "bootstrap-icons.woff2"
+
+_dl "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/fonts/bootstrap-icons.woff" \
+    "$INSTALL_DIR/static/fonts/bootstrap-icons.woff" "bootstrap-icons.woff"
+
+# Патчим bootstrap-icons.css чтобы шрифты грузились локально
+if [ -f "$INSTALL_DIR/static/bootstrap-icons.css" ]; then
+    sed -i \
+        's|../fonts/bootstrap-icons.woff2|/static/fonts/bootstrap-icons.woff2|g;
+         s|../fonts/bootstrap-icons.woff|/static/fonts/bootstrap-icons.woff|g' \
+        "$INSTALL_DIR/static/bootstrap-icons.css"
+    echo "    ✓ bootstrap-icons.css пути к шрифтам обновлены"
 fi
 
 # ---------- base.html ----------
@@ -1414,16 +1453,16 @@ cat > $INSTALL_DIR/templates/base.html << 'BASEEOF'
     
     <title>{% block title %}TRASSIR Monitor{% endblock %}</title>
     
-    <!-- Bootstrap 5 CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap 5 CSS (локальный) -->
+    <link href="/static/bootstrap.min.css" rel="stylesheet">
     
-    <!-- Bootstrap Icons -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/bootstrap-icons.css" rel="stylesheet">
+    <!-- Bootstrap Icons (локальный) -->
+    <link href="/static/bootstrap-icons.css" rel="stylesheet">
     
-    <!-- Chart.js для графиков -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+    <!-- Chart.js для графиков (локальный) -->
+    <script src="/static/chart.min.js"></script>
     
-    <!-- Socket.io (локальный файл) -->
+    <!-- Socket.io (локальный) -->
     <script src="/static/socket.io.min.js"></script>
     
     <style>
@@ -1798,8 +1837,8 @@ cat > $INSTALL_DIR/templates/base.html << 'BASEEOF'
         {% block content %}{% endblock %}
     </div>
     
-    <!-- Bootstrap JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Bootstrap JS (локальный) -->
+    <script src="/static/bootstrap.bundle.min.js"></script>
     
     <!-- Скрипты -->
     <script>
@@ -2907,6 +2946,7 @@ Environment="PATH=$INSTALL_DIR/venv/bin"
 ExecStart=$INSTALL_DIR/venv/bin/gunicorn --config $INSTALL_DIR/gunicorn_config.py app.app:app
 Restart=always
 RestartSec=5
+KillMode=mixed
 StandardOutput=append:$INSTALL_DIR/logs/system.log
 StandardError=append:$INSTALL_DIR/logs/system-error.log
 
@@ -3036,7 +3076,7 @@ rm -f /etc/nginx/sites-enabled/trassir-monitor
 rm -f /etc/nginx/sites-available/trassir-monitor
 
 systemctl daemon-reload
-systemctl restart nginx 2>/dev/null || true
+systemctl restart nginx 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null || true
 
 echo ""
 read -p "Сохранить базу данных перед удалением? (y/N): " save_data
