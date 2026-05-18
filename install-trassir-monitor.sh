@@ -145,13 +145,19 @@ echo "  • Проверка и установка необходимых пак
 declare -A PKGS
 PKGS["python3"]="Интерпретатор Python 3"
 PKGS["python3-venv"]="Виртуальное окружение Python"
-PKGS["python3-pip"]="Менеджер пакетов Python"
 PKGS["python3-dev"]="Заголовочные файлы Python"
+PKGS["gcc"]="Компилятор C (нужен для gevent)"
+PKGS["libffi-dev"]="Библиотека FFI (нужна для gevent)"
 PKGS["nginx"]="Веб-сервер Nginx"
 PKGS["sqlite3"]="База данных SQLite"
 PKGS["curl"]="Утилита для HTTP-запросов"
 PKGS["wget"]="Утилита для скачивания файлов"
 PKGS["net-tools"]="Сетевые утилиты"
+
+# python3-pip: есть в Debian 12, удалён в Debian 13 (там pip только через venv/ensurepip)
+if apt-cache show python3-pip &>/dev/null; then
+    PKGS["python3-pip"]="Менеджер пакетов Python"
+fi
 
 for pkg in "${!PKGS[@]}"; do
     if dpkg -l | grep -q "^ii.*$pkg "; then
@@ -185,7 +191,9 @@ echo "    ✓ Каталоги созданы"
 # Создаём виртуальное окружение
 echo ""
 echo "  • Создание виртуального окружения Python..."
-python3 -m venv $INSTALL_DIR/venv
+# --upgrade-deps обновляет pip/setuptools внутри venv (важно для Debian 13)
+python3 -m venv --upgrade-deps $INSTALL_DIR/venv 2>/dev/null || \
+    python3 -m venv $INSTALL_DIR/venv
 echo "    ✓ Виртуальное окружение создано"
 
 # Активируем окружение
@@ -3067,10 +3075,11 @@ echo "    ✓ Права установлены"
 # Запуск сервисов
 echo ""
 echo "  • Запуск сервисов..."
+NGINX_BIN=$(command -v nginx || echo "/usr/sbin/nginx")
 systemctl daemon-reload
 systemctl enable $SERVICE
 systemctl restart $SERVICE
-systemctl restart nginx
+systemctl restart nginx 2>/dev/null || $NGINX_BIN -s reload 2>/dev/null || true
 echo "    ✓ Сервисы запущены"
 
 # Ждём запуска
