@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor v12.0
-# Проверено на Debian 12
+# TRASSIR Monitor v13.0
+# Проверено на Debian 12,13
 # ============================================
 set -e
 
@@ -25,9 +25,15 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}║   TRASSIR Monitor v12.0 — Final Complete     ║${NC}"
 echo -e "${GREEN}║   Имена каналов • Алерты • Live дашборд      ║${NC}"
-echo -e "${GREEN}║   Debian 11/12/13 • Ничего не урезано        ║${NC}"
+echo -e "${GREEN}║   Debian 12/13 • gevent • Python 3.12/3.13  ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
+echo ""
+
+# Определяем версию Debian и Python для информации
+DEBIAN_VERSION=$(. /etc/os-release && echo "$VERSION_ID")
+PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
+echo -e "${CYAN}  ОС: Debian ${DEBIAN_VERSION}  |  Python: ${PYTHON_VERSION}${NC}"
 echo ""
 
 # Проверка прав root
@@ -47,6 +53,20 @@ echo -e "  ${BOLD}Порт Web-интерфейса${NC}"
 echo -e "  На каком порту будет доступен веб-интерфейс мониторинга"
 read -p "  Порт (Enter для 8080): " WEB_PORT
 WEB_PORT=${WEB_PORT:-8080}
+
+# Проверяем что порт не конфликтует с внутренним портом gunicorn (5001)
+if [ "$WEB_PORT" = "5001" ]; then
+    echo -e "  ${RED}❌ Порт 5001 зарезервирован для внутреннего использования (gunicorn).${NC}"
+    echo -e "  Выберите другой порт (например 8080)."
+    exit 1
+fi
+if ss -tlnp 2>/dev/null | grep -q ":${WEB_PORT} " || \
+   netstat -tlnp 2>/dev/null | grep -q ":${WEB_PORT} "; then
+    echo -e "  ${YELLOW}⚠ Порт ${WEB_PORT} уже используется другим процессом!${NC}"
+    echo -e "  Проверьте: ${CYAN}ss -tlnp | grep :${WEB_PORT}${NC}"
+    read -p "  Продолжить установку? (y/N): " cont
+    [[ $cont =~ ^[Yy]$ ]] || exit 1
+fi
 echo ""
 
 echo -e "  ${BOLD}Интервал опроса TRASSIR${NC}"
@@ -209,11 +229,11 @@ pip install --index-url https://pypi.org/simple/ --timeout=600 schedule -q 2>/de
     pip install --index-url https://pypi.org/simple/ --timeout=900 schedule
 echo "      ✓ schedule установлен"
 
-# Устанавливаем eventlet
-echo "    • Установка eventlet..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 eventlet -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 eventlet
-echo "      ✓ eventlet установлен"
+# Устанавливаем gevent (работает на Python 3.12 и 3.13, в отличие от eventlet)
+echo "    • Установка gevent..."
+pip install --index-url https://pypi.org/simple/ --timeout=600 gevent gevent-websocket -q 2>/dev/null || \
+    pip install --index-url https://pypi.org/simple/ --timeout=900 gevent gevent-websocket
+echo "      ✓ gevent установлен"
 
 # Устанавливаем gunicorn
 echo "    • Установка gunicorn..."
@@ -230,7 +250,7 @@ echo "      ✓ python-dotenv установлен"
 # Проверка установки
 echo ""
 echo "  • Проверка установленных пакетов:"
-pip list 2>/dev/null | grep -E "Flask|flask-socketio|requests|schedule|eventlet|gunicorn" | while read line; do
+pip list 2>/dev/null | grep -E "Flask|flask-socketio|requests|schedule|gevent|gunicorn" | while read line; do
     echo "    ✓ $line"
 done
 
@@ -296,8 +316,8 @@ app.secret_key = secrets.token_hex(32)
 # Включаем поддержку Cross-Origin Resource Sharing
 CORS(app)
 
-# Инициализация SocketIO для WebSocket (используем eventlet)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+# Инициализация SocketIO для WebSocket (используем gevent — поддерживает Python 3.12+/3.13)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
 
 # Отключаем предупреждения SSL для самоподписанных сертификатов
 requests.packages.urllib3.disable_warnings()
@@ -2846,10 +2866,10 @@ echo ""
 echo "  • Создание конфигурации Gunicorn..."
 cat > $INSTALL_DIR/gunicorn_config.py << 'GUNEOF'
 # Конфигурация Gunicorn для TRASSIR Monitor v12.0
-# Использует eventlet для поддержки WebSocket
+# Использует gevent для поддержки WebSocket (совместим с Python 3.12+/3.13)
 
-bind = "127.0.0.1:5000"
-worker_class = "eventlet"
+bind = "127.0.0.1:5001"
+worker_class = "geventwebsocket.gunicorn.workers.GeventWebSocketWorker"
 workers = 1
 threads = 4
 timeout = 120
@@ -2890,8 +2910,13 @@ echo "  • Создание конфигурации Nginx..."
 cat > /etc/nginx/sites-available/trassir-monitor << NGINXEOF
 # Nginx конфигурация для TRASSIR Monitor v12.0
 server {
-    listen $WEB_PORT;
+    listen $WEB_PORT default_server;
+    listen [::]:$WEB_PORT default_server;
     server_name _;
+
+    # Буферы для заголовков (лечит "400 Bad Request: Request Header Or Cookie Too Large")
+    large_client_header_buffers 4 32k;
+    client_header_buffer_size 8k;
     
     # Статические файлы
     location /static/ {
@@ -2902,7 +2927,7 @@ server {
     
     # WebSocket прокси
     location /socket.io/ {
-        proxy_pass http://127.0.0.1:5000/socket.io/;
+        proxy_pass http://127.0.0.1:5001/socket.io/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -2910,11 +2935,12 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_read_timeout 86400;
+        proxy_buffering off;
     }
     
     # Основное приложение
     location / {
-        proxy_pass http://127.0.0.1:5000;
+        proxy_pass http://127.0.0.1:5001;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
