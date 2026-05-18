@@ -2,7 +2,7 @@
 
 > **Система мониторинга серверов TRASSIR** — веб-дашборд с live-обновлением, алертами, историей, Telegram и Email уведомлениями.
 
-[![Platform](https://img.shields.io/badge/platform-Debian%2011%2F12%2F13-blue)](https://www.debian.org/)
+[![Platform](https://img.shields.io/badge/platform-Debian%2F12%2F13-blue)](https://www.debian.org/)
 [![Python](https://img.shields.io/badge/python-3.x-blue)](https://www.python.org/)
 [![Shell](https://img.shields.io/badge/install-one--liner-green)](#-быстрая-установка)
 
