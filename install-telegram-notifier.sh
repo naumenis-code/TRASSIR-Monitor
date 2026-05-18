@@ -1550,8 +1550,7 @@ echo ""
 cat > "/etc/systemd/system/$SERVICE_BOT.service" << SERVEOF
 [Unit]
 Description=TRASSIR Monitor Telegram Bot
-After=$SERVICE_MAIN.service
-Requires=$SERVICE_MAIN.service
+After=$SERVICE_MAIN.service network.target
 
 [Service]
 Type=simple
@@ -1562,6 +1561,7 @@ Environment="PATH=$INSTALL_DIR/venv/bin"
 ExecStart=$VENV_PYTHON $TGBOT_PY
 Restart=always
 RestartSec=10
+KillMode=mixed
 StandardOutput=append:$LOG_DIR/tgbot.log
 StandardError=append:$LOG_DIR/tgbot-error.log
 
@@ -1668,6 +1668,9 @@ esac
 # ФИНАЛЬНЫЙ ВЫВОД
 # ============================================
 IP=$(hostname -I | awk '{print $1}')
+# Определяем реальный порт из nginx конфига
+WEB_PORT=$(grep -m1 'listen ' /etc/nginx/sites-available/trassir-monitor 2>/dev/null | grep -oP '\d+' | head -1)
+WEB_PORT=${WEB_PORT:-8080}
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
@@ -1676,7 +1679,7 @@ echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${BOLD}Веб-управление:${NC}"
-echo -e "   ${CYAN}http://${IP}:8080/settings${NC}"
+echo -e "   ${CYAN}http://${IP}:${WEB_PORT}/settings${NC}"
 echo ""
 echo -e "${BOLD}Управление ботом:${NC}"
 echo -e "   Статус:      ${YELLOW}systemctl status $SERVICE_BOT${NC}"
