@@ -54,12 +54,7 @@ echo -e "  На каком порту будет доступен веб-инт�
 read -p "  Порт (Enter для 8080): " WEB_PORT
 WEB_PORT=${WEB_PORT:-8080}
 
-# Проверяем что порт не конфликтует с внутренним портом gunicorn (5001)
-if [ "$WEB_PORT" = "5001" ]; then
-    echo -e "  ${RED}❌ Порт 5001 зарезервирован для внутреннего использования (gunicorn).${NC}"
-    echo -e "  Выберите другой порт (например 8080)."
-    exit 1
-fi
+# Проверяем что внешний порт не занят
 if ss -tlnp 2>/dev/null | grep -q ":${WEB_PORT} " || \
    netstat -tlnp 2>/dev/null | grep -q ":${WEB_PORT} "; then
     echo -e "  ${YELLOW}⚠ Порт ${WEB_PORT} уже используется другим процессом!${NC}"
@@ -67,6 +62,13 @@ if ss -tlnp 2>/dev/null | grep -q ":${WEB_PORT} " || \
     read -p "  Продолжить установку? (y/N): " cont
     [[ $cont =~ ^[Yy]$ ]] || exit 1
 fi
+
+# Вычисляем внутренний порт gunicorn — WEB_PORT+1, ищем первый свободный
+APP_PORT=$((WEB_PORT + 1))
+while ss -tlnp 2>/dev/null | grep -q ":${APP_PORT} "; do
+    APP_PORT=$((APP_PORT + 1))
+done
+echo -e "  ${CYAN}Внутренний порт приложения: ${APP_PORT}${NC}"
 echo ""
 
 echo -e "  ${BOLD}Интервал опроса TRASSIR${NC}"
@@ -2864,11 +2866,11 @@ echo ""
 
 # Gunicorn конфигурация
 echo "  • Создание конфигурации Gunicorn..."
-cat > $INSTALL_DIR/gunicorn_config.py << 'GUNEOF'
+cat > $INSTALL_DIR/gunicorn_config.py << GUNEOF
 # Конфигурация Gunicorn для TRASSIR Monitor v12.0
 # Использует gevent для поддержки WebSocket (совместим с Python 3.12+/3.13)
 
-bind = "127.0.0.1:5001"
+bind = "127.0.0.1:${APP_PORT}"
 worker_class = "geventwebsocket.gunicorn.workers.GeventWebSocketWorker"
 workers = 1
 threads = 4
@@ -2927,7 +2929,7 @@ server {
     
     # WebSocket прокси
     location /socket.io/ {
-        proxy_pass http://127.0.0.1:5001/socket.io/;
+        proxy_pass http://127.0.0.1:${APP_PORT}/socket.io/;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -2940,7 +2942,7 @@ server {
     
     # Основное приложение
     location / {
-        proxy_pass http://127.0.0.1:5001;
+        proxy_pass http://127.0.0.1:${APP_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
