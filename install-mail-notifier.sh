@@ -5,7 +5,7 @@
 # Автономный демон отправки алертов по Email
 # Настройка SMTP через веб-интерфейс /settings
 # Поддержка нескольких получателей
-# Debian 11/12/13
+# Debian 12/13
 # Русский язык
 # ============================================
 # ИСПРАВЛЕНО (v1.3):
@@ -42,7 +42,7 @@ echo -e "${CYAN}║   TRASSIR Monitor — Mail Notifier v1.3       ║${NC}"
 echo -e "${CYAN}║   Автономный демон Email-уведомлений         ║${NC}"
 echo -e "${CYAN}║   Настройка через веб-интерфейс              ║${NC}"
 echo -e "${CYAN}║   Восстановление каналов и серверов          ║${NC}"
-echo -e "${CYAN}║   Debian 11/12/13 • Русский язык             ║${NC}"
+echo -e "${CYAN}║   Debian  12/13 • Русский язык               ║${NC}"
 echo -e "${CYAN}║                                              ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -1420,7 +1420,7 @@ else
     echo "  • Добавление карточки Email в settings.html..."
 
     export SETTINGS_HTML="$SETTINGS_HTML"
-    python3 << 'PYHTML'
+    $VENV_PYTHON << 'PYHTML'
 import re
 import os
 
@@ -1749,8 +1749,7 @@ cat > "/etc/systemd/system/$SERVICE_MAIL.service" << SERVEOF
 [Unit]
 Description=TRASSIR Monitor Mail Notifier
 Documentation=https://github.com/trassir-monitor
-After=$SERVICE_MAIN.service
-Requires=$SERVICE_MAIN.service
+After=$SERVICE_MAIN.service network.target
 
 [Service]
 Type=simple
@@ -1761,6 +1760,7 @@ Environment="PATH=$INSTALL_DIR/venv/bin"
 ExecStart=$VENV_PYTHON $MAILBOT_PY
 Restart=always
 RestartSec=10
+KillMode=mixed
 StandardOutput=append:$LOG_DIR/mailbot.log
 StandardError=append:$LOG_DIR/mailbot-error.log
 
@@ -1889,6 +1889,9 @@ esac
 # ============================================
 
 IP=$(hostname -I | awk '{print $1}')
+# Определяем реальный порт из nginx конфига
+WEB_PORT=$(grep -m1 'listen ' /etc/nginx/sites-available/trassir-monitor 2>/dev/null | grep -oP '\d+' | head -1)
+WEB_PORT=${WEB_PORT:-8080}
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
@@ -1898,7 +1901,7 @@ echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "${BOLD}🌐 Веб-управление:${NC}"
-echo -e "   ${CYAN}http://${IP}:8080/settings${NC}"
+echo -e "   ${CYAN}http://${IP}:${WEB_PORT}/settings${NC}"
 echo -e "   (прокрутите вниз до карточки Email)"
 echo ""
 echo -e "${BOLD}📋 Управление сервисом:${NC}"
