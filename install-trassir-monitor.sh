@@ -1426,13 +1426,26 @@ _dl "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/fonts/bootstrap-ico
 _dl "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.0/font/fonts/bootstrap-icons.woff" \
     "$INSTALL_DIR/static/fonts/bootstrap-icons.woff" "bootstrap-icons.woff"
 
-# Патчим bootstrap-icons.css чтобы шрифты грузились локально
+# Пересоздаём @font-face в начале CSS с правильными локальными путями
+# (оригинальный CSS может использовать ../fonts/ или другие относительные пути)
 if [ -f "$INSTALL_DIR/static/bootstrap-icons.css" ]; then
-    sed -i \
-        's|../fonts/bootstrap-icons.woff2|/static/fonts/bootstrap-icons.woff2|g;
-         s|../fonts/bootstrap-icons.woff|/static/fonts/bootstrap-icons.woff|g' \
-        "$INSTALL_DIR/static/bootstrap-icons.css"
-    echo "    ✓ bootstrap-icons.css пути к шрифтам обновлены"
+    # Удаляем существующий @font-face блок и вставляем правильный
+    awk '
+        /^@font-face/ { skip=1 }
+        skip && /\}/ { skip=0; next }
+        !skip { print }
+    ' "$INSTALL_DIR/static/bootstrap-icons.css" > /tmp/bi_clean.css
+
+    cat > "$INSTALL_DIR/static/bootstrap-icons.css" << 'FONTEOF'
+@font-face {
+  font-family: "bootstrap-icons";
+  src: url("/static/fonts/bootstrap-icons.woff2") format("woff2"),
+       url("/static/fonts/bootstrap-icons.woff") format("woff");
+}
+FONTEOF
+    cat /tmp/bi_clean.css >> "$INSTALL_DIR/static/bootstrap-icons.css"
+    rm -f /tmp/bi_clean.css
+    echo "    ✓ @font-face обновлён → /static/fonts/"
 fi
 
 # ---------- base.html ----------
