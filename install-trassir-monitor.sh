@@ -25,7 +25,7 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}║   TRASSIR Monitor v12.0 — Final Complete     ║${NC}"
 echo -e "${GREEN}║   Имена каналов • Алерты • Live дашборд      ║${NC}"
-echo -e "${GREEN}║   Debian 12/13 • gevent • Python 3.12/3.13   ║${NC}"
+echo -e "${GREEN}║   Debian 12/13 • gevent • Python 3.12/3.13  ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -835,12 +835,51 @@ def collect():
                                 (server_id, level, message)
                             )
                             conn.commit()
+                    elif message.startswith("CPU:"):
+                        # Дедупликация по типу — CPU меняется каждый опрос, ищем по префиксу
+                        existing = conn.execute(
+                            "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'CPU:%' AND ack = 0",
+                            (server_id,)
+                        ).fetchone()
+                        if existing:
+                            # Обновляем значение если изменилось
+                            if existing["msg"] != message:
+                                conn.execute(
+                                    "UPDATE alerts SET msg = ?, ts = datetime('now', '+3 hours') WHERE id = ?",
+                                    (message, existing["id"])
+                                )
+                                conn.commit()
+                        else:
+                            conn.execute(
+                                "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
+                                (server_id, level, message)
+                            )
+                            conn.commit()
+                    elif message.startswith("Архив:"):
+                        # Дедупликация по типу — глубина архива меняется, ищем по префиксу
+                        existing = conn.execute(
+                            "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'Архив:%' AND ack = 0",
+                            (server_id,)
+                        ).fetchone()
+                        if existing:
+                            if existing["msg"] != message:
+                                conn.execute(
+                                    "UPDATE alerts SET msg = ?, ts = datetime('now', '+3 hours') WHERE id = ?",
+                                    (message, existing["id"])
+                                )
+                                conn.commit()
+                        else:
+                            conn.execute(
+                                "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
+                                (server_id, level, message)
+                            )
+                            conn.commit()
                     else:
+                        # Остальные алерты (диски) — точное совпадение
                         existing = conn.execute(
                             "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ack = 0",
                             (server_id, message)
                         ).fetchone()
-                        
                         if not existing:
                             conn.execute(
                                 "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
@@ -1064,12 +1103,19 @@ def server_detail(server_id):
         ORDER BY ts
     """, (server_id,)).fetchall()
     
-    # Алерты (последние 100)
-    alerts = conn.execute("""
+    # Активные алерты (не закрытые)
+    alerts_active = conn.execute("""
         SELECT * FROM alerts 
-        WHERE server_id = ? 
-        ORDER BY ts DESC 
-        LIMIT 100
+        WHERE server_id = ? AND ack = 0
+        ORDER BY ts DESC
+    """, (server_id,)).fetchall()
+    
+    # История закрытых алертов (последние 20)
+    alerts_history = conn.execute("""
+        SELECT * FROM alerts 
+        WHERE server_id = ? AND ack = 1
+        ORDER BY ts DESC
+        LIMIT 20
     """, (server_id,)).fetchall()
     
     # Текущее состояние (последняя запись)
@@ -1087,7 +1133,8 @@ def server_detail(server_id):
         server=dict(server),
         history=[dict(h) for h in history],
         cur=dict(current) if current else None,
-        alerts=[dict(a) for a in alerts]
+        alerts_active=[dict(a) for a in alerts_active],
+        alerts_history=[dict(a) for a in alerts_history]
     )
 
 
@@ -2549,26 +2596,44 @@ cat > $INSTALL_DIR/templates/server.html << 'SERVEREOF'
                 </button>
             </div>
             <div class="card-body" style="max-height: 500px; overflow-y: auto;">
-                {% if alerts %}
-                    {% for alert in alerts %}
+                {% if alerts_active %}
+                    <div class="mb-2" style="font-size:0.75rem; color:var(--muted); text-transform:uppercase; letter-spacing:1px;">Активные проблемы</div>
+                    {% for alert in alerts_active %}
                     <div class="alert-item {{ alert.level }}">
                         <div class="d-flex justify-content-between align-items-start mb-2">
-                            <strong style="font-size: 1.1rem;">
-                                {% if alert.level == 'critical' %}
-                                    🔴 КРИТИЧЕСКАЯ ОШИБКА
-                                {% elif alert.level == 'warning' %}
-                                    ⚠️ ПРЕДУПРЕЖДЕНИЕ
-                                {% else %}
-                                    ℹ️ ИНФОРМАЦИЯ
-                                {% endif %}
+                            <strong>
+                                {% if alert.level == 'critical' %}🔴 КРИТИЧЕСКАЯ
+                                {% elif alert.level == 'warning' %}⚠️ ПРЕДУПРЕЖДЕНИЕ
+                                {% else %}ℹ️ ИНФОРМАЦИЯ{% endif %}
                             </strong>
                             <span class="badge bg-dark">{{ alert.ts }}</span>
                         </div>
-                        <div style="font-size: 1rem;">
-                            {{ alert.msg }}
+                        <div>{{ alert.msg }}</div>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="text-center py-4">
+                        <i class="bi bi-check-circle" style="font-size: 3rem; color: var(--green);"></i>
+                        <p class="mt-2" style="color: var(--muted);">Нет активных проблем</p>
+                    </div>
+                {% endif %}
+                
+                {% if alerts_history %}
+                    <div class="mt-3 mb-2" style="font-size:0.75rem; color:var(--muted); text-transform:uppercase; letter-spacing:1px;">
+                        История (последние {{ alerts_history|length }})
+                    </div>
+                    {% for alert in alerts_history %}
+                    <div class="alert-item {{ alert.level }}" style="opacity:0.4;">
+                        <div class="d-flex justify-content-between align-items-start mb-1">
+                            <strong style="font-size:0.85rem;">
+                                {% if alert.level == 'critical' %}🔴{% elif alert.level == 'warning' %}⚠️{% else %}ℹ️{% endif %}
+                                {{ alert.msg }}
+                            </strong>
+                            <span class="badge bg-dark" style="font-size:0.7rem; white-space:nowrap;">{{ alert.ts }}</span>
                         </div>
                     </div>
                     {% endfor %}
+                {% endif %}
                 {% else %}
                     <div class="text-center py-4">
                         <i class="bi bi-check-circle" style="font-size: 3rem; color: var(--green);"></i>
