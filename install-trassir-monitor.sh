@@ -25,7 +25,7 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}║   TRASSIR Monitor v12.0 — Final Complete     ║${NC}"
 echo -e "${GREEN}║   Имена каналов • Алерты • Live дашборд      ║${NC}"
-echo -e "${GREEN}║   Debian 12/13 • gevent • Python 3.12/3.13  ║${NC}"
+echo -e "${GREEN}║   Debian 12/13 • gevent • Python 3.12/3.13   ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -2948,7 +2948,8 @@ cat > /etc/systemd/system/$SERVICE.service << SERVEOF
 [Unit]
 Description=TRASSIR Monitor v12.0
 Documentation=https://github.com/trassir-monitor
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -2967,6 +2968,20 @@ StandardError=append:$INSTALL_DIR/logs/system-error.log
 WantedBy=multi-user.target
 SERVEOF
 echo "    ✓ systemd сервис создан"
+
+# Nginx drop-in — гарантируем перезапуск nginx после смены IP/сети
+echo "  • Настройка nginx для корректной работы при смене IP..."
+mkdir -p /etc/systemd/system/nginx.service.d
+cat > /etc/systemd/system/nginx.service.d/restart-on-network.conf << 'NGINXDROPEOF'
+[Unit]
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Restart=on-failure
+RestartSec=5
+NGINXDROPEOF
+echo "    ✓ nginx drop-in создан"
 
 # Nginx конфигурация
 echo "  • Создание конфигурации Nginx..."
@@ -3087,6 +3102,8 @@ echo "Удаление конфигурационных файлов..."
 rm -f /etc/systemd/system/trassir-monitor.service
 rm -f /etc/nginx/sites-enabled/trassir-monitor
 rm -f /etc/nginx/sites-available/trassir-monitor
+rm -f /etc/systemd/system/nginx.service.d/restart-on-network.conf
+rmdir /etc/systemd/system/nginx.service.d 2>/dev/null || true
 
 systemctl daemon-reload
 systemctl restart nginx 2>/dev/null || /usr/sbin/nginx -s reload 2>/dev/null || true
@@ -3129,6 +3146,11 @@ echo "    ✓ Права установлены"
 echo ""
 echo "  • Запуск сервисов..."
 NGINX_BIN=$(command -v nginx || echo "/usr/sbin/nginx")
+
+# Включаем network-online.target чтобы сервисы ждали полного поднятия сети
+systemctl enable systemd-networkd-wait-online.service 2>/dev/null || \
+systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
+
 systemctl daemon-reload
 systemctl enable $SERVICE
 systemctl restart $SERVICE
