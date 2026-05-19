@@ -815,9 +815,10 @@ def collect():
                             (server_id,)
                         ).fetchone()
                         if existing:
+                            # Обновляем только текст — время первого появления не трогаем
                             if existing["msg"] != message:
                                 conn.execute(
-                                    "UPDATE alerts SET msg = ?, ts = datetime('now', '+3 hours') WHERE id = ?",
+                                    "UPDATE alerts SET msg = ? WHERE id = ?",
                                     (message, existing["id"])
                                 )
                                 conn.commit()
@@ -836,16 +837,15 @@ def collect():
                             )
                             conn.commit()
                     elif message.startswith("CPU:"):
-                        # Дедупликация по типу — CPU меняется каждый опрос, ищем по префиксу
                         existing = conn.execute(
                             "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'CPU:%' AND ack = 0",
                             (server_id,)
                         ).fetchone()
                         if existing:
-                            # Обновляем значение если изменилось
+                            # Обновляем только текст значения, время не трогаем
                             if existing["msg"] != message:
                                 conn.execute(
-                                    "UPDATE alerts SET msg = ?, ts = datetime('now', '+3 hours') WHERE id = ?",
+                                    "UPDATE alerts SET msg = ? WHERE id = ?",
                                     (message, existing["id"])
                                 )
                                 conn.commit()
@@ -856,7 +856,6 @@ def collect():
                             )
                             conn.commit()
                     elif message.startswith("Архив:"):
-                        # Дедупликация по типу — глубина архива меняется, ищем по префиксу
                         existing = conn.execute(
                             "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'Архив:%' AND ack = 0",
                             (server_id,)
@@ -864,7 +863,7 @@ def collect():
                         if existing:
                             if existing["msg"] != message:
                                 conn.execute(
-                                    "UPDATE alerts SET msg = ?, ts = datetime('now', '+3 hours') WHERE id = ?",
+                                    "UPDATE alerts SET msg = ? WHERE id = ?",
                                     (message, existing["id"])
                                 )
                                 conn.commit()
@@ -875,7 +874,7 @@ def collect():
                             )
                             conn.commit()
                     else:
-                        # Остальные алерты (диски) — точное совпадение
+                        # Диски — точное совпадение
                         existing = conn.execute(
                             "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ack = 0",
                             (server_id, message)
@@ -2617,7 +2616,6 @@ cat > $INSTALL_DIR/templates/server.html << 'SERVEREOF'
                         <p class="mt-2" style="color: var(--muted);">Нет активных проблем</p>
                     </div>
                 {% endif %}
-                
                 {% if alerts_history %}
                     <div class="mt-3 mb-2" style="font-size:0.75rem; color:var(--muted); text-transform:uppercase; letter-spacing:1px;">
                         История (последние {{ alerts_history|length }})
@@ -2633,12 +2631,6 @@ cat > $INSTALL_DIR/templates/server.html << 'SERVEREOF'
                         </div>
                     </div>
                     {% endfor %}
-                {% endif %}
-                {% else %}
-                    <div class="text-center py-4">
-                        <i class="bi bi-check-circle" style="font-size: 3rem; color: var(--green);"></i>
-                        <p class="mt-2" style="color: var(--muted);">Нет активных алертов</p>
-                    </div>
                 {% endif %}
             </div>
         </div>
