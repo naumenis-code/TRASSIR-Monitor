@@ -823,7 +823,7 @@ def get_new_alerts():
     """
     conn = get_database_connection()
     try:
-        # --- Обычные алерты ---
+        # --- Обычные алерты (ack=0, ещё не отправлялись) ---
         alerts_rows = conn.execute(
             """SELECT
                    a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
@@ -839,23 +839,24 @@ def get_new_alerts():
                ORDER BY a.ts ASC"""
         ).fetchall()
 
-        # --- Восстановления (info + ключевые слова) ---
+        # --- Восстановления: алерты которые закрылись (ack=1)
+        #     но в telegram_logs есть запись об отправке (значит мы их отправляли)
+        #     и нет записи о восстановлении (alert_key = 'recovery_' + id) ---
         recovery_rows = conn.execute(
             """SELECT
                    a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
                    s.name as server_name, s.ip as server_ip
                FROM alerts a
                JOIN servers s ON a.server_id = s.id
-               WHERE a.level = 'info'
-                 AND (
-                       a.msg LIKE '%восстановлен%'
-                    OR a.msg LIKE '%restored%'
-                    OR a.msg LIKE '%back online%'
-                    OR a.msg LIKE '%вернулся%'
+               WHERE a.ack = 1
+                 AND a.level IN ('warning', 'critical')
+                 AND EXISTS (
+                     SELECT 1 FROM telegram_logs tl
+                     WHERE tl.alert_key = CAST(a.id AS TEXT)
                  )
                  AND NOT EXISTS (
                      SELECT 1 FROM telegram_logs tl
-                     WHERE tl.alert_key = CAST(a.id AS TEXT)
+                     WHERE tl.alert_key = 'recovery_' || CAST(a.id AS TEXT)
                  )
                ORDER BY a.ts ASC"""
         ).fetchall()
@@ -1018,7 +1019,9 @@ def run_bot():
                         continue
 
                     if send_telegram_message(chat_id, text):
-                        mark_alert_as_sent(alert['id'], chat_id)
+                        # Для восстановлений пишем отдельный ключ чтобы не путать с оригинальным алертом
+                        key = f"recovery_{alert['id']}" if alert.get('is_recovery') else alert['id']
+                        mark_alert_as_sent(key, chat_id)
                         sent_to.append(str(chat_id))
                         total_sent += 1
                         time.sleep(0.05)
