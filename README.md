@@ -53,7 +53,7 @@
 
 ```bash
 wget https://raw.githubusercontent.com/naumenis-code/TRASSIR-Monitor/main/install-trassir-monitor.sh
-sudo bash install-trassir-monitor.sh
+bash install-trassir-monitor.sh
 ```
 
 Установщик спросит:
@@ -68,7 +68,7 @@ sudo bash install-trassir-monitor.sh
 
 ```bash
 wget https://raw.githubusercontent.com/naumenis-code/TRASSIR-Monitor/main/install-telegram-notifier.sh
-sudo bash install-telegram-notifier.sh
+bash install-telegram-notifier.sh
 ```
 
 Потребуется:
@@ -82,7 +82,7 @@ sudo bash install-telegram-notifier.sh
 
 ```bash
 wget https://raw.githubusercontent.com/naumenis-code/TRASSIR-Monitor/main/install-mail-notifier.sh
-sudo bash install-mail-notifier.sh
+bash install-mail-notifier.sh
 ```
 
 Потребуется:
