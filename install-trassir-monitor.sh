@@ -709,144 +709,106 @@ def collect():
                 ))
                 conn.commit()  # ← ВАЖНО! Сохраняем health сразу
                 
-                # Инициализируем channels_info (может понадобиться)
+                # Инициализируем channels_info
                 channels_info = None
                 offline_names = []
-                
+
                 # ============================================
-                # ПРОВЕРКА ВОССТАНОВЛЕНИЯ КАНАЛОВ
+                # ПОЛУЧАЕМ СОСТОЯНИЕ КАНАЛОВ (если есть отвал)
                 # ============================================
-                try:
-                    old_alerts = conn.execute(
-                        "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'Камер офлайн%' AND ack = 0",
-                        (server_id,)
-                    ).fetchall()
-                    
-                    if old_alerts and health["ch_o"] == health["ch_t"]:
-                        # Все камеры онлайн — закрываем все алерты по камерам
-                        for old_alert in old_alerts:
-                            conn.execute("UPDATE alerts SET ack = 1 WHERE id = ?", (old_alert["id"],))
-                        conn.commit()
-                        print(f"  ✅ {server_name}: все камеры восстановлены")
-                    elif old_alerts and health["ch_o"] > 0:
-                        # Частичное восстановление — проверяем конкретные каналы
+                if health["ch_t"] > health["ch_o"] or conn.execute(
+                    "SELECT id FROM alerts WHERE server_id = ? AND msg LIKE 'Камера офлайн:%' AND ack = 0",
+                    (server_id,)
+                ).fetchone():
+                    # Есть отвал или были активные алерты — запрашиваем состояние каналов
+                    try:
                         channels_info = client.get_channels_info()
                         if channels_info and channels_info.get("ok"):
-                            online_channels = {name for name, status in channels_info["channels"].items() if status}
-                            for old_alert in old_alerts:
-                                offline_names_in_alert = re.findall(r'[\w\-]+', old_alert["msg"].split(":", 1)[-1])
-                                all_online = all(
-                                    any(n in online_name for online_name in online_channels)
-                                    for n in offline_names_in_alert if n
-                                )
-                                if all_online:
-                                    conn.execute("UPDATE alerts SET ack = 1 WHERE id = ?", (old_alert["id"],))
-                                    conn.commit()
-                                    print(f"  ✅ {server_name}: алерт закрыт")
-                except Exception as e:
-                    print(f"  ⚠ Ошибка при проверке восстановления для {server_name}: {e}")
-                
-                # ============================================
-                # ОПРЕДЕЛЕНИЕ ИМЁН ОТКЛЮЧЁННЫХ КАНАЛОВ
-                # ============================================
-                
-                if health["ch_t"] > health["ch_o"]:
-                    print(f"  {server_name}: обнаружен отвал камер ({health['ch_o']}/{health['ch_t']}), запрашиваю имена...")
-                    
-                    try:
-                        if not channels_info or not channels_info.get("ok"):
-                            channels_info = client.get_channels_info()
-                        
-                        if channels_info and channels_info.get("ok"):
-                            for channel_name, is_online in channels_info["channels"].items():
+                            for ch_name, is_online in channels_info["channels"].items():
                                 if not is_online:
-                                    offline_names.append(channel_name)
-                            
-                            print(f"  {server_name}: найдено {len(offline_names)} офлайн-каналов")
+                                    offline_names.append(ch_name)
+                            print(f"  {server_name}: офлайн каналов: {len(offline_names)}")
                     except Exception as e:
-                        print(f"  {server_name}: ошибка получения имён каналов: {e}")
-                
+                        print(f"  {server_name}: ошибка получения каналов: {e}")
+
                 # ============================================
-                # ГЕНЕРАЦИЯ АЛЕРТОВ
+                # ВОССТАНОВЛЕНИЕ — ЗАКРЫВАЕМ АЛЕРТЫ ПО КАМЕРАМ
+                # ============================================
+                if channels_info and channels_info.get("ok"):
+                    all_channels = channels_info["channels"]
+                    active_cam_alerts = conn.execute(
+                        "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'Камера офлайн:%' AND ack = 0",
+                        (server_id,)
+                    ).fetchall()
+                    for alert in active_cam_alerts:
+                        # Извлекаем имя камеры из сообщения "Камера офлайн: CamName"
+                        cam_name = alert["msg"].replace("Камера офлайн: ", "").strip()
+                        # Если камера теперь онлайн — закрываем алерт
+                        if all_channels.get(cam_name, False):
+                            conn.execute("UPDATE alerts SET ack = 1 WHERE id = ?", (alert["id"],))
+                            conn.commit()
+                            print(f"  ✅ {server_name}: камера восстановлена: {cam_name}")
+                elif health["ch_o"] == health["ch_t"]:
+                    # Все камеры онлайн по health — закрываем все камерные алерты
+                    conn.execute(
+                        "UPDATE alerts SET ack = 1 WHERE server_id = ? AND msg LIKE 'Камера офлайн:%' AND ack = 0",
+                        (server_id,)
+                    )
+                    conn.commit()
+
+                # ============================================
+                # ГЕНЕРАЦИЯ АЛЕРТОВ ПО КАМЕРАМ — ОДИН НА КАМЕРУ
+                # ============================================
+                for cam_name in offline_names:
+                    message = f"Камера офлайн: {cam_name}"
+                    existing = conn.execute(
+                        "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ack = 0",
+                        (server_id, message)
+                    ).fetchone()
+                    if not existing:
+                        conn.execute(
+                            "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), 'warning', ?)",
+                            (server_id, message)
+                        )
+                        print(f"  ⚠ {server_name}: новый алерт — {message}")
+                conn.commit()
+
+                # ============================================
+                # ГЕНЕРАЦИЯ АЛЕРТОВ — CPU, ДИСКИ, АРХИВ
                 # ============================================
                 alerts_list = []
-                
+
                 if health["disks"] == 0:
                     alerts_list.append(("critical", "Ошибка дисков"))
-                
-                offline_count = health["ch_t"] - health["ch_o"]
-                if offline_count > 0:
-                    if offline_names:
-                        names_str = ", ".join(offline_names[:5])
-                        message = f"Камер офлайн ({offline_count}): {names_str}"
-                        if len(offline_names) > 5:
-                            message += f" + ещё {len(offline_names) - 5}"
-                        alerts_list.append(("warning", message))
-                    else:
-                        alerts_list.append(("warning", f"Камер офлайн: {offline_count}/{health['ch_t']}"))
-                
+
                 cpu_warning = float(settings.get("cpu_warning", 80))
                 if health["cpu"] >= cpu_warning:
                     alerts_list.append(("warning", f"CPU: {health['cpu']:.1f}%"))
-                
+
                 arch_warning = float(settings.get("archive_warning_days", 14))
                 if health["arch"] <= arch_warning:
                     alerts_list.append(("warning", f"Архив: {health['arch']:.1f} дн"))
                 
                 # ============================================
-                # АВТОЗАКРЫТИЕ АЛЕРТОВ КОГДА ПРОБЛЕМА УШЛА
+                # АВТОЗАКРЫТИЕ CPU, АРХИВА, ДИСКОВ
                 # ============================================
                 active_types = {msg.split(":")[0].split("(")[0].strip() for _, msg in alerts_list}
-                
-                # Закрываем CPU алерт если CPU в норме
+
                 if "CPU" not in active_types:
                     conn.execute("UPDATE alerts SET ack = 1 WHERE server_id = ? AND msg LIKE 'CPU:%' AND ack = 0", (server_id,))
-                
-                # Закрываем алерт дисков если диски в норме
                 if "Ошибка дисков" not in active_types:
                     conn.execute("UPDATE alerts SET ack = 1 WHERE server_id = ? AND msg = 'Ошибка дисков' AND ack = 0", (server_id,))
-                
-                # Закрываем алерт архива если архив в норме
                 if "Архив" not in active_types:
                     conn.execute("UPDATE alerts SET ack = 1 WHERE server_id = ? AND msg LIKE 'Архив:%' AND ack = 0", (server_id,))
-                
                 conn.commit()
                 
                 for level, message in alerts_list:
-                    if message.startswith("Камер офлайн"):
-                        existing = conn.execute(
-                            "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'Камер офлайн%' AND ack = 0",
-                            (server_id,)
-                        ).fetchone()
-                        if existing:
-                            # Обновляем только текст — время первого появления не трогаем
-                            if existing["msg"] != message:
-                                conn.execute(
-                                    "UPDATE alerts SET msg = ? WHERE id = ?",
-                                    (message, existing["id"])
-                                )
-                                conn.commit()
-                                try:
-                                    conn.execute(
-                                        "DELETE FROM telegram_logs WHERE alert_key = ?",
-                                        (str(existing["id"]),)
-                                    )
-                                    conn.commit()
-                                except Exception:
-                                    pass  # таблица telegram_logs создаётся при установке telegram-нотифайера
-                        else:
-                            conn.execute(
-                                "INSERT INTO alerts (server_id, ts, level, msg) VALUES (?, datetime('now', '+3 hours'), ?, ?)",
-                                (server_id, level, message)
-                            )
-                            conn.commit()
-                    elif message.startswith("CPU:"):
+                    if message.startswith("CPU:"):
                         existing = conn.execute(
                             "SELECT id, msg FROM alerts WHERE server_id = ? AND msg LIKE 'CPU:%' AND ack = 0",
                             (server_id,)
                         ).fetchone()
                         if existing:
-                            # Обновляем только текст значения, время не трогаем
                             if existing["msg"] != message:
                                 conn.execute(
                                     "UPDATE alerts SET msg = ? WHERE id = ?",
