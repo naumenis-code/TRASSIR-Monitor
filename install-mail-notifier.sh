@@ -545,7 +545,7 @@ def get_new_alerts():
         ).fetchall()
 
         result = []
-        for row in list(alerts_rows) + list(recovery_rows):
+        for row in list(alerts_rows):
             d = dict(row)
             health_row = conn.execute(
                 """SELECT cpu, disks, ch_total, ch_online, arch, uptime, rt
@@ -558,12 +558,37 @@ def get_new_alerts():
                 'cpu': '?', 'ch_online': '?', 'ch_total': '?',
                 'arch': '?', 'uptime': 0, 'rt': '?'
             }
-            d['is_recovery'] = is_recovery_message(d['msg'])
-            # Для восстановлений считаем время простоя
-            if d['is_recovery']:
-                d['downtime'] = calc_downtime_for_alert(conn, d)
+            d['is_recovery'] = False
+            d['downtime'] = ''
+            result.append(d)
+
+        for row in list(recovery_rows):
+            d = dict(row)
+            health_row = conn.execute(
+                """SELECT cpu, disks, ch_total, ch_online, arch, uptime, rt
+                   FROM health
+                   WHERE server_id = ?
+                   ORDER BY ts DESC LIMIT 1""",
+                (d['server_id'],)
+            ).fetchone()
+            d['health'] = dict(health_row) if health_row else {
+                'cpu': '?', 'ch_online': '?', 'ch_total': '?',
+                'arch': '?', 'uptime': 0, 'rt': '?'
+            }
+            d['is_recovery'] = True
+            d['downtime'] = calc_downtime_for_alert(conn, d)
+            # Формируем текст восстановления
+            orig = d['msg']
+            if 'Камер офлайн' in orig or 'офлайн' in orig.lower():
+                d['recovery_msg'] = f"Камеры восстановлены (было: {orig})"
+            elif 'CPU' in orig:
+                d['recovery_msg'] = f"CPU в норме (было: {orig})"
+            elif 'Архив' in orig:
+                d['recovery_msg'] = f"Архив в норме (было: {orig})"
+            elif 'диск' in orig.lower():
+                d['recovery_msg'] = f"Диски в норме (было: {orig})"
             else:
-                d['downtime'] = ''
+                d['recovery_msg'] = f"Восстановлено (было: {orig})"
             result.append(d)
 
         return result
@@ -824,11 +849,20 @@ def classify_alert(level, message):
 
 def format_alert_email(alert_data, settings):
     """Формирует HTML-письмо для алерта"""
-    style = classify_alert(alert_data['level'], alert_data['msg'])
+    is_recovery = alert_data.get('is_recovery', False)
+    # Для восстановлений используем сформированный текст
+    if is_recovery and alert_data.get('recovery_msg'):
+        msg_to_show = alert_data['recovery_msg']
+    else:
+        msg_to_show = alert_data.get('msg', '')
+    
+    style = classify_alert(alert_data['level'], msg_to_show)
+    if is_recovery:
+        style = classify_alert('info', 'восстановлен')
     server_name = alert_data.get('server_name', '\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u0441\u0435\u0440\u0432\u0435\u0440')
     server_ip = alert_data.get('server_ip', '')
     server_id = alert_data.get('server_id', '')
-    message = alert_data.get('msg', '\u041d\u0435\u0442 \u043e\u043f\u0438\u0441\u0430\u043d\u0438\u044f')
+    message = msg_to_show
     # Отображаем время в локальном часовом поясе
     ts_raw = alert_data.get('ts', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     try:
