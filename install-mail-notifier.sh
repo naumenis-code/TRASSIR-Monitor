@@ -5,7 +5,7 @@
 # Автономный демон отправки алертов по Email
 # Настройка SMTP через веб-интерфейс /settings
 # Поддержка нескольких получателей
-# Debian 12/13
+# Debian 11/12/13
 # Русский язык
 # ============================================
 # ИСПРАВЛЕНО (v1.3):
@@ -42,7 +42,7 @@ echo -e "${CYAN}║   TRASSIR Monitor — Mail Notifier v1.3       ║${NC}"
 echo -e "${CYAN}║   Автономный демон Email-уведомлений         ║${NC}"
 echo -e "${CYAN}║   Настройка через веб-интерфейс              ║${NC}"
 echo -e "${CYAN}║   Восстановление каналов и серверов          ║${NC}"
-echo -e "${CYAN}║   Debian  12/13 • Русский язык               ║${NC}"
+echo -e "${CYAN}║   Debian 11/12/13 • Русский язык             ║${NC}"
 echo -e "${CYAN}║                                              ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -507,7 +507,7 @@ def get_new_alerts():
     """
     conn = get_db()
     try:
-        # Обычные алерты (warning, critical)
+        # Обычные алерты (warning, critical, ещё не отправлялись)
         alerts_rows = conn.execute(
             """SELECT
                    a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
@@ -523,27 +523,25 @@ def get_new_alerts():
                ORDER BY a.ts ASC"""
         ).fetchall()
 
-        # Восстановления (info + ключевые слова)
+        # Восстановления: алерты закрылись (ack=1),
+        # мы их отправляли, но ещё не отправляли уведомление о восстановлении
         recovery_rows = conn.execute(
             """SELECT
                    a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
                    s.name as server_name, s.ip as server_ip
                FROM alerts a
                JOIN servers s ON a.server_id = s.id
-               WHERE a.level = 'info'
-                 AND (
-                       a.msg LIKE ?
-                    OR a.msg LIKE ?
-                    OR a.msg LIKE ?
-                    OR a.msg LIKE ?
-                 )
-                 AND NOT EXISTS (
+               WHERE a.ack = 1
+                 AND a.level IN ('warning', 'critical')
+                 AND EXISTS (
                      SELECT 1 FROM mail_logs ml
                      WHERE ml.alert_key = CAST(a.id AS TEXT)
                  )
-               ORDER BY a.ts ASC""",
-            (f'%{STR_RESTORED1}%', f'%{STR_RESTORED2}%',
-             f'%{STR_BACK_ONLINE}%', f'%{STR_RETURNED}%')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM mail_logs ml
+                     WHERE ml.alert_key = 'recovery_' || CAST(a.id AS TEXT)
+                 )
+               ORDER BY a.ts ASC"""
         ).fetchall()
 
         result = []
@@ -1204,7 +1202,8 @@ def run_bot():
                             continue
 
                     if send_email(email, rcpt.get('name', ''), subject, html_body, settings):
-                        mark_alert_as_sent(alert['id'], email, subject)
+                        key = f"recovery_{alert['id']}" if alert.get('is_recovery') else alert['id']
+                        mark_alert_as_sent(key, email, subject)
                         sent_to.append(email)
                         total_sent += 1
                         time.sleep(0.2)
