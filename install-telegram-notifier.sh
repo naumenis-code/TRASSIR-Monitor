@@ -738,7 +738,7 @@ def calc_downtime_for_alert(conn, alert):
             offline_row = conn.execute(
                 """SELECT ts FROM alerts
                    WHERE server_id = ?
-                     AND (msg LIKE '%' || ? || '%' OR msg LIKE 'Камер офлайн%')
+                     AND msg LIKE 'Камера офлайн:%' || ?
                      AND ts < ?
                    ORDER BY ts DESC LIMIT 1""",
                 (server_id, channel_name, recovery_ts_str)
@@ -883,8 +883,9 @@ def get_new_alerts():
             d['is_recovery'] = True
             # Формируем текст восстановления на основе оригинального сообщения
             orig = d['msg']
-            if 'Камер офлайн' in orig or 'офлайн' in orig.lower():
-                d['recovery_msg'] = f"✅ Камеры восстановлены (было: {orig})"
+            if 'Камера офлайн:' in orig:
+                cam_name = orig.replace('Камера офлайн: ', '').strip()
+                d['recovery_msg'] = f"✅ Камера восстановлена: {cam_name}"
             elif 'CPU' in orig:
                 d['recovery_msg'] = f"✅ CPU в норме (было: {orig})"
             elif 'Архив' in orig:
