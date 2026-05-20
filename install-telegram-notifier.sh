@@ -634,8 +634,15 @@ def format_alert_message(alert_data):
     timestamp  = alert_data.get('ts', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     health     = alert_data.get('health', {})
     downtime   = alert_data.get('downtime', '')
+    is_recovery = alert_data.get('is_recovery', False)
 
-    kind, header, is_recovery = classify_alert(level, message)
+    # Для восстановлений используем сформированный текст
+    if is_recovery and alert_data.get('recovery_msg'):
+        message = alert_data['recovery_msg']
+
+    kind, header, _ = classify_alert(level, message)
+    if is_recovery:
+        kind, header = 'OK', 'ВОССТАНОВЛЕНИЕ'
     emoji = EMOJI_REAL.get(kind, '\u2757')
 
     cfg = get_config()
@@ -873,7 +880,19 @@ def get_new_alerts():
             d = dict(row)
             d['health'] = get_health_for_server(conn, d['server_id'])
             d['downtime'] = calc_downtime_for_alert(conn, d)
-            d['is_recovery'] = True  # восстановления всегда отправляются
+            d['is_recovery'] = True
+            # Формируем текст восстановления на основе оригинального сообщения
+            orig = d['msg']
+            if 'Камер офлайн' in orig or 'офлайн' in orig.lower():
+                d['recovery_msg'] = f"✅ Камеры восстановлены (было: {orig})"
+            elif 'CPU' in orig:
+                d['recovery_msg'] = f"✅ CPU в норме (было: {orig})"
+            elif 'Архив' in orig:
+                d['recovery_msg'] = f"✅ Архив в норме (было: {orig})"
+            elif 'диск' in orig.lower() or 'disk' in orig.lower():
+                d['recovery_msg'] = f"✅ Диски в норме (было: {orig})"
+            else:
+                d['recovery_msg'] = f"✅ Восстановлено (было: {orig})"
             result.append(d)
 
         return result
