@@ -579,8 +579,9 @@ def get_new_alerts():
             d['downtime'] = calc_downtime_for_alert(conn, d)
             # Формируем текст восстановления
             orig = d['msg']
-            if 'Камер офлайн' in orig or 'офлайн' in orig.lower():
-                d['recovery_msg'] = f"Камеры восстановлены (было: {orig})"
+            if 'Камера офлайн:' in orig:
+                cam_name = orig.replace('Камера офлайн: ', '').strip()
+                d['recovery_msg'] = f"Камера восстановлена: {cam_name}"
             elif 'CPU' in orig:
                 d['recovery_msg'] = f"CPU в норме (было: {orig})"
             elif 'Архив' in orig:
