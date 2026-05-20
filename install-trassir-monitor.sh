@@ -714,7 +714,7 @@ def collect():
                 offline_names = []
                 
                 # ============================================
-                # ПРОВЕРКА ВОССТАНОВЛЕНИЯ КАНАЛОВ (ВСЕГДА)
+                # ПРОВЕРКА ВОССТАНОВЛЕНИЯ КАНАЛОВ
                 # ============================================
                 try:
                     old_alerts = conn.execute(
@@ -722,44 +722,29 @@ def collect():
                         (server_id,)
                     ).fetchall()
                     
-                    if old_alerts:
+                    if old_alerts and health["ch_o"] == health["ch_t"]:
+                        # Все камеры онлайн — закрываем все алерты по камерам
+                        for old_alert in old_alerts:
+                            conn.execute("UPDATE alerts SET ack = 1 WHERE id = ?", (old_alert["id"],))
+                        conn.commit()
+                        print(f"  ✅ {server_name}: все камеры восстановлены")
+                    elif old_alerts and health["ch_o"] > 0:
+                        # Частичное восстановление — проверяем конкретные каналы
                         channels_info = client.get_channels_info()
                         if channels_info and channels_info.get("ok"):
                             online_channels = {name for name, status in channels_info["channels"].items() if status}
-                            
                             for old_alert in old_alerts:
-                                offline_names_in_alert = re.findall(r'#[^,]+', old_alert["msg"])
-                                all_online = True
-                                for offline_name in offline_names_in_alert:
-                                    found_online = False
-                                    for online_name in online_channels:
-                                        if offline_name.strip() in online_name:
-                                            found_online = True
-                                            break
-                                    if not found_online:
-                                        all_online = False
-                                
+                                offline_names_in_alert = re.findall(r'[\w\-]+', old_alert["msg"].split(":", 1)[-1])
+                                all_online = all(
+                                    any(n in online_name for online_name in online_channels)
+                                    for n in offline_names_in_alert if n
+                                )
                                 if all_online:
                                     conn.execute("UPDATE alerts SET ack = 1 WHERE id = ?", (old_alert["id"],))
                                     conn.commit()
-                                    
-                                    recovered_list = [n.strip() for n in offline_names_in_alert]
-                                    recovery_msg = f"Канал восстановлен: {recovered_list[0]}" if len(recovered_list) == 1 else f"Каналы восстановлены ({len(recovered_list)})"
-                                    
-                                    dup = conn.execute(
-                                        "SELECT id FROM alerts WHERE server_id = ? AND msg = ? AND ts > datetime('now', '+3 hours', '-1 hours')",
-                                        (server_id, recovery_msg)
-                                    ).fetchone()
-                                    
-                                    if not dup:
-                                        conn.execute(
-                                            "INSERT INTO alerts (server_id, ts, level, msg, ack) VALUES (?, datetime('now', '+3 hours'), 'info', ?, 1)",
-                                            (server_id, recovery_msg)
-                                        )
-                                        conn.commit()
-                                        print(f"  ✅ {server_name}: {recovery_msg}")
+                                    print(f"  ✅ {server_name}: алерт закрыт")
                 except Exception as e:
-                    print(f"  ⚠ Ошибка при проверке восстановления каналов для {server_name}: {e}")
+                    print(f"  ⚠ Ошибка при проверке восстановления для {server_name}: {e}")
                 
                 # ============================================
                 # ОПРЕДЕЛЕНИЕ ИМЁН ОТКЛЮЧЁННЫХ КАНАЛОВ
@@ -807,6 +792,25 @@ def collect():
                 arch_warning = float(settings.get("archive_warning_days", 14))
                 if health["arch"] <= arch_warning:
                     alerts_list.append(("warning", f"Архив: {health['arch']:.1f} дн"))
+                
+                # ============================================
+                # АВТОЗАКРЫТИЕ АЛЕРТОВ КОГДА ПРОБЛЕМА УШЛА
+                # ============================================
+                active_types = {msg.split(":")[0].split("(")[0].strip() for _, msg in alerts_list}
+                
+                # Закрываем CPU алерт если CPU в норме
+                if "CPU" not in active_types:
+                    conn.execute("UPDATE alerts SET ack = 1 WHERE server_id = ? AND msg LIKE 'CPU:%' AND ack = 0", (server_id,))
+                
+                # Закрываем алерт дисков если диски в норме
+                if "Ошибка дисков" not in active_types:
+                    conn.execute("UPDATE alerts SET ack = 1 WHERE server_id = ? AND msg = 'Ошибка дисков' AND ack = 0", (server_id,))
+                
+                # Закрываем алерт архива если архив в норме
+                if "Архив" not in active_types:
+                    conn.execute("UPDATE alerts SET ack = 1 WHERE server_id = ? AND msg LIKE 'Архив:%' AND ack = 0", (server_id,))
+                
+                conn.commit()
                 
                 for level, message in alerts_list:
                     if message.startswith("Камер офлайн"):
