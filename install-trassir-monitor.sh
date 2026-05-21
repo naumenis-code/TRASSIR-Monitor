@@ -1173,7 +1173,7 @@ def api_history(server_id):
     
     Используется для построения графиков.
     """
-    hours = request.args.get("h", 24, type=int)
+    hours = request.args.get("h", 0.5, type=float)
     
     conn = get_db()
     history = conn.execute("""
@@ -2540,9 +2540,10 @@ cat > $INSTALL_DIR/templates/server.html << 'SERVEREOF'
             <div class="card-header">
                 <span><i class="bi bi-graph-up"></i> История за 24 часа</span>
                 <div class="btn-group btn-group-sm">
-                    <button class="btn btn-outline-light active" onclick="loadHistory(6)">6ч</button>
-                    <button class="btn btn-outline-light" onclick="loadHistory(24)">24ч</button>
-                    <button class="btn btn-outline-light" onclick="loadHistory(168)">7д</button>
+                    <button class="btn btn-outline-light active" onclick="loadHistory(0.5, this)">30м</button>
+                    <button class="btn btn-outline-light" onclick="loadHistory(6, this)">6ч</button>
+                    <button class="btn btn-outline-light" onclick="loadHistory(24, this)">24ч</button>
+                    <button class="btn btn-outline-light" onclick="loadHistory(168, this)">7д</button>
                 </div>
             </div>
             <div class="card-body">
@@ -2612,20 +2613,57 @@ cat > $INSTALL_DIR/templates/server.html << 'SERVEREOF'
 // ============================================
 var historyChart = null;
 
-function loadHistory(hours) {
+function loadHistory(hours, btn) {
+    // Обновляем активную кнопку
+    if (btn) {
+        document.querySelectorAll('.btn-group .btn').forEach(function(b) {
+            b.classList.remove('active');
+        });
+        btn.classList.add('active');
+    }
+
     fetch('/api/hist/{{ server.id }}?h=' + hours)
         .then(function(response) { return response.json(); })
         .then(function(data) {
-            var labels = data.map(function(item) {
-                return new Date(item.ts).toLocaleTimeString('ru-RU');
-            });
-            
-            var ctx = document.getElementById('historyChart').getContext('2d');
-            
-            if (historyChart) {
-                historyChart.destroy();
+            if (!data.length) return;
+
+            // Агрегация — максимум 60 точек на графике
+            var maxPoints = 60;
+            var aggregated = data;
+            if (data.length > maxPoints) {
+                var step = Math.ceil(data.length / maxPoints);
+                aggregated = [];
+                for (var i = 0; i < data.length; i += step) {
+                    var chunk = data.slice(i, i + step);
+                    var avg = function(key) {
+                        return chunk.reduce(function(s, r) { return s + (r[key] || 0); }, 0) / chunk.length;
+                    };
+                    aggregated.push({
+                        ts:        chunk[Math.floor(chunk.length / 2)].ts,
+                        cpu:       avg('cpu'),
+                        ch_online: Math.round(avg('ch_online')),
+                        ch_total:  Math.round(avg('ch_total')),
+                        arch:      avg('arch')
+                    });
+                }
             }
-            
+
+            // Формат меток времени зависит от диапазона
+            var labels = aggregated.map(function(item) {
+                var d = new Date(item.ts);
+                if (hours <= 1) {
+                    return d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+                } else if (hours <= 24) {
+                    return d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+                } else {
+                    return d.toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit'}) + ' ' +
+                           d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+                }
+            });
+
+            var ctx = document.getElementById('historyChart').getContext('2d');
+            if (historyChart) { historyChart.destroy(); }
+
             historyChart = new Chart(ctx, {
                 type: 'line',
                 data: {
@@ -2633,98 +2671,58 @@ function loadHistory(hours) {
                     datasets: [
                         {
                             label: 'CPU %',
-                            data: data.map(function(item) { return item.cpu; }),
+                            data: aggregated.map(function(item) { return item.cpu; }),
                             borderColor: '#667eea',
                             backgroundColor: 'rgba(102, 126, 234, 0.1)',
-                            fill: true,
-                            tension: 0.4,
-                            borderWidth: 2
+                            fill: true, tension: 0.4, borderWidth: 2
                         },
                         {
                             label: 'Камеры онлайн',
-                            data: data.map(function(item) { return item.ch_online; }),
+                            data: aggregated.map(function(item) { return item.ch_online; }),
                             borderColor: '#10b981',
                             backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                            fill: true,
-                            tension: 0.4,
-                            borderWidth: 2,
-                            yAxisID: 'y1'
+                            fill: true, tension: 0.4, borderWidth: 2, yAxisID: 'y1'
                         },
                         {
                             label: 'Архив (дни)',
-                            data: data.map(function(item) { return item.arch; }),
+                            data: aggregated.map(function(item) { return item.arch; }),
                             borderColor: '#f59e0b',
                             backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                            fill: true,
-                            tension: 0.4,
-                            borderWidth: 2,
-                            yAxisID: 'y2'
+                            fill: true, tension: 0.4, borderWidth: 2, yAxisID: 'y2'
                         }
                     ]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    interaction: {
-                        mode: 'index',
-                        intersect: false
-                    },
+                    interaction: { mode: 'index', intersect: false },
                     plugins: {
-                        legend: {
-                            labels: {
-                                color: '#d1d5db'
-                            }
-                        }
+                        legend: { labels: { color: '#d1d5db' } }
                     },
                     scales: {
                         y: {
-                            type: 'linear',
-                            display: true,
-                            position: 'left',
-                            title: {
-                                display: true,
-                                text: 'CPU %',
-                                color: '#667eea'
-                            },
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.05)'
-                            },
-                            ticks: {
-                                color: '#6b7280'
-                            }
+                            type: 'linear', display: true, position: 'left',
+                            title: { display: true, text: 'CPU %', color: '#667eea' },
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                            ticks: { color: '#6b7280' }
                         },
                         y1: {
-                            type: 'linear',
-                            display: true,
-                            position: 'right',
-                            title: {
-                                display: true,
-                                text: 'Камеры',
-                                color: '#10b981'
-                            },
-                            grid: {
-                                drawOnChartArea: false
-                            },
-                            ticks: {
-                                color: '#6b7280'
-                            }
+                            type: 'linear', display: true, position: 'right',
+                            title: { display: true, text: 'Камеры', color: '#10b981' },
+                            grid: { drawOnChartArea: false },
+                            ticks: { color: '#6b7280' }
                         },
                         y2: {
-                            type: 'linear',
-                            display: false,
-                            position: 'right',
-                            grid: {
-                                drawOnChartArea: false
-                            }
+                            type: 'linear', display: false, position: 'right',
+                            grid: { drawOnChartArea: false }
                         },
                         x: {
                             ticks: {
                                 color: '#6b7280',
-                                maxTicksLimit: 10
+                                maxTicksLimit: 10,
+                                maxRotation: 0
                             },
-                            grid: {
-                                color: 'rgba(255, 255, 255, 0.05)'
-                            }
+                            grid: { color: 'rgba(255,255,255,0.05)' }
                         }
                     }
                 }
@@ -2759,7 +2757,7 @@ function acknowledgeAlerts() {
 }
 
 // Запуск
-loadHistory(24);
+loadHistory(0.5);
 refreshMetrics();
 setInterval(refreshMetrics, 30000);
 </script>
