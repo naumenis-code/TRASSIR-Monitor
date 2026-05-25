@@ -4170,8 +4170,9 @@ NGINX_BIN=$(command -v nginx || echo "/usr/sbin/nginx")
 systemctl enable systemd-networkd-wait-online.service 2>/dev/null || \
 systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
 
-systemctl daemon-reload
+
 systemctl enable $SERVICE
+systemctl daemon-reload
 systemctl restart $SERVICE
 systemctl restart nginx 2>/dev/null || $NGINX_BIN -s reload 2>/dev/null || true
 echo "    ✓ Сервисы запущены"
