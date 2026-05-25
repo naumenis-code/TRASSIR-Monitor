@@ -301,7 +301,7 @@ import time
 import re
 import secrets
 from datetime import datetime
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, session, redirect, url_for
 from flask_cors import CORS
 from flask_socketio import SocketIO
 import requests
@@ -331,6 +331,25 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="gevent")
 
 # Отключаем предупреждения SSL для самоподписанных сертификатов
 requests.packages.urllib3.disable_warnings()
+
+# ============================================
+# АВТОРИЗАЦИЯ
+# ============================================
+
+from functools import wraps
+
+def login_required(f):
+    """Декоратор — только для авторизованных пользователей."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("logged_in"):
+            return redirect(url_for("login_page"))
+        return f(*args, **kwargs)
+    return decorated
+
+def is_logged_in():
+    """Проверка авторизации для шаблонов."""
+    return bool(session.get("logged_in"))
 
 # ============================================
 # ГЛОБАЛЬНЫЙ КЭШ ДАННЫХ
@@ -427,8 +446,67 @@ def init_db():
     """)
     
     # ============================================
-    # Индексы для ускорения запросов
+    # Таблицы для Telegram нотифайера
     # ============================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_chats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT UNIQUE NOT NULL,
+            name TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1,
+            warning INTEGER DEFAULT 1,
+            critical INTEGER DEFAULT 1,
+            info INTEGER DEFAULT 0,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME,
+            alert_key TEXT,
+            chat_id TEXT
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_tg_logs_key ON telegram_logs(alert_key, ts)")
+
+    # ============================================
+    # Таблицы для Mail нотифайера
+    # ============================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mail_recipients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            name TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1,
+            warning INTEGER DEFAULT 1,
+            critical INTEGER DEFAULT 1,
+            info INTEGER DEFAULT 0,
+            added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mail_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mail_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME,
+            alert_key TEXT,
+            recipient TEXT,
+            subject TEXT
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mail_logs_key ON mail_logs(alert_key, ts)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_health_srv_time ON health(server_id, ts)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_srv ON alerts(server_id, ack)")
     
@@ -442,6 +520,7 @@ def init_db():
         ("cpu_critical", "95"),
         ("archive_warning_days", "14"),
         ("archive_critical_days", "7"),
+        ("admin_password", "admin"),
     ]
     
     for key, value in default_settings:
@@ -945,6 +1024,29 @@ def handle_disconnect():
 # МАРШРУТЫ (ROUTES)
 # ============================================
 
+@app.route("/login", methods=["GET", "POST"])
+def login_page():
+    error = None
+    if request.method == "POST":
+        conn = get_db()
+        settings = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+        conn.close()
+        password = request.form.get("password", "")
+        if password == settings.get("admin_password", "admin"):
+            session["logged_in"] = True
+            session.permanent = True
+            return redirect(url_for("index"))
+        else:
+            error = "Неверный пароль"
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
+
+
 @app.route("/")
 def index():
     """
@@ -1035,7 +1137,8 @@ def index():
     return render_template(
         "dashboard.html",
         servers=servers_data,
-        stats=stats
+        stats=stats,
+        logged_in=is_logged_in()
     )
 
 
@@ -1099,38 +1202,57 @@ def server_detail(server_id):
         history=[dict(h) for h in history],
         cur=dict(current) if current else None,
         alerts_active=[dict(a) for a in alerts_active],
-        alerts_history=[dict(a) for a in alerts_history]
+        alerts_history=[dict(a) for a in alerts_history],
+        logged_in=is_logged_in()
     )
 
 
 @app.route("/settings")
 def settings_page():
-    """
-    Страница настроек системы.
-    Позволяет:
-    - Изменять параметры мониторинга (интервал, пороги)
-    - Просматривать и удалять серверы
-    """
     conn = get_db()
-    
-    # Все серверы
-    servers = conn.execute(
-        "SELECT * FROM servers ORDER BY name"
-    ).fetchall()
-    
-    # Все настройки
-    settings_dict = dict(conn.execute(
-        "SELECT key, value FROM settings"
-    ).fetchall())
-    
+
+    servers = conn.execute("SELECT * FROM servers ORDER BY name").fetchall()
+    settings_dict = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+
+    # Определяем какие службы установлены
+    has_telegram = os.path.exists(os.path.join(BASE_DIR, "app", "tg_bot.py")) or \
+                   os.path.exists(os.path.join(BASE_DIR, "app", "tg_proxy_bot.py"))
+    has_mail     = os.path.exists(os.path.join(BASE_DIR, "app", "mail_bot.py"))
+
+    # Данные telegram (только если авторизован и служба есть)
+    tg_chats    = []
+    tg_settings = {}
+    if has_telegram and is_logged_in():
+        try:
+            tg_chats = [dict(r) for r in conn.execute("SELECT * FROM telegram_chats ORDER BY id").fetchall()]
+            tg_settings = dict(conn.execute("SELECT key, value FROM telegram_settings").fetchall())
+        except Exception:
+            pass
+
+    # Данные mail (только если авторизован и служба есть)
+    mail_recipients = []
+    mail_settings   = {}
+    if has_mail and is_logged_in():
+        try:
+            mail_recipients = [dict(r) for r in conn.execute("SELECT * FROM mail_recipients ORDER BY id").fetchall()]
+            mail_settings   = dict(conn.execute("SELECT key, value FROM mail_settings").fetchall())
+        except Exception:
+            pass
+
     conn.close()
-    
+
     return render_template(
         "settings.html",
         servers=[dict(s) for s in servers],
-        settings=settings_dict
+        settings=settings_dict,
+        logged_in=is_logged_in(),
+        has_telegram=has_telegram,
+        has_mail=has_mail,
+        tg_chats=tg_chats,
+        tg_settings=tg_settings,
+        mail_recipients=mail_recipients,
+        mail_settings=mail_settings
     )
-
 
 # ============================================
 # API ENDPOINTS
@@ -1189,15 +1311,17 @@ def api_history(server_id):
 
 @app.route("/api/servers", methods=["GET", "POST", "PUT", "DELETE"])
 def api_servers():
-    """
-    API для управления серверами.
-    
-    GET    — список всех серверов
-    POST   — добавить новый сервер
-    PUT    — изменить существующий сервер
-    DELETE — удалить сервер
-    """
     conn = get_db()
+    
+    if request.method == "GET":
+        servers = conn.execute("SELECT * FROM servers ORDER BY name").fetchall()
+        conn.close()
+        return jsonify([dict(s) for s in servers])
+    
+    # Все изменения только для авторизованных
+    if not session.get("logged_in"):
+        conn.close()
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
     
     if request.method == "GET":
         servers = conn.execute(
@@ -1300,20 +1424,16 @@ def acknowledge_alerts(server_id):
 
 @app.route("/api/settings", methods=["GET", "POST"])
 def api_settings():
-    """
-    API для работы с настройками.
-    
-    GET  — получить все настройки
-    POST — обновить настройки (ключ-значение)
-    """
     conn = get_db()
     
     if request.method == "GET":
-        settings_dict = dict(conn.execute(
-            "SELECT key, value FROM settings"
-        ).fetchall())
+        settings_dict = dict(conn.execute("SELECT key, value FROM settings").fetchall())
         conn.close()
         return jsonify(settings_dict)
+    
+    if not session.get("logged_in"):
+        conn.close()
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
     
     elif request.method == "POST":
         data = request.json
@@ -1325,6 +1445,222 @@ def api_settings():
         conn.commit()
         conn.close()
         return jsonify({"ok": 1, "message": "Настройки сохранены"})
+
+
+@app.route("/api/telegram/chats", methods=["GET", "POST", "PUT", "DELETE"])
+def api_telegram_chats():
+    conn = get_db()
+    if request.method == "GET":
+        try:
+            chats = [dict(r) for r in conn.execute("SELECT * FROM telegram_chats ORDER BY id").fetchall()]
+        except Exception:
+            chats = []
+        conn.close()
+        return jsonify(chats)
+    if not session.get("logged_in"):
+        conn.close()
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    data = {}
+    if request.content_type and "application/json" in request.content_type:
+        data = request.get_json(silent=True) or {}
+    if request.method == "POST":
+        chat_id = str(data.get("chat_id", "")).strip()
+        name    = data.get("name", "").strip()
+        if not chat_id:
+            conn.close()
+            return jsonify({"ok": 0, "error": "chat_id обязателен"}), 400
+        conn.execute("INSERT OR IGNORE INTO telegram_chats (chat_id, name) VALUES (?, ?)", (chat_id, name))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": 1})
+    elif request.method == "PUT":
+        cid = data.get("id")
+        if "enabled" in data and len(data) == 2:
+            # Только toggle enabled
+            conn.execute("UPDATE telegram_chats SET enabled=? WHERE id=?", (data.get("enabled"), cid))
+        else:
+            conn.execute("UPDATE telegram_chats SET chat_id=?, name=?, enabled=?, warning=?, critical=? WHERE id=?",
+                (data.get("chat_id"), data.get("name",""), data.get("enabled",1),
+                 data.get("warning",1), data.get("critical",1), cid))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": 1})
+    elif request.method == "DELETE":
+        cid = request.args.get("id")
+        conn.execute("DELETE FROM telegram_chats WHERE id=?", (cid,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": 1})
+    conn.close()
+    return jsonify({"ok": 0}), 400
+
+
+@app.route("/api/telegram/settings", methods=["GET", "POST"])
+def api_telegram_settings():
+    conn = get_db()
+    if request.method == "GET":
+        # Базовый статус доступен всем — только факт настройки без деталей
+        import configparser as _cp, os as _os
+        result = {"token_configured": False, "proxy_url": "", "token_masked": ""}
+        for cfg_file in ["config_tgproxy.ini", "config.ini"]:
+            cfg_path = os.path.join(BASE_DIR, cfg_file)
+            if _os.path.exists(cfg_path):
+                cfg = _cp.ConfigParser()
+                cfg.read(cfg_path)
+                if "telegram" in cfg:
+                    token = cfg["telegram"].get("token", "").strip()
+                    if token:
+                        result["token_configured"] = True
+                        result["token_masked"] = token[:10] + "..." + token[-4:]
+                    result["proxy_url"] = cfg["telegram"].get("proxy_url", "").strip()
+                    result["proxy_configured"] = bool(cfg["telegram"].get("proxy", "").strip())
+                    break
+        # Настройки из БД — только для авторизованных
+        if session.get("logged_in"):
+            try:
+                s = dict(conn.execute("SELECT key, value FROM telegram_settings").fetchall())
+                result.update(s)
+            except Exception:
+                pass
+        conn.close()
+        return jsonify(result)
+    if not session.get("logged_in"):
+        conn.close()
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    data = request.json or {}
+    for key, value in data.items():
+        conn.execute("INSERT OR REPLACE INTO telegram_settings (key, value) VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": 1})
+
+
+@app.route("/api/telegram/test", methods=["POST"])
+def api_telegram_test():
+    if not session.get("logged_in"):
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    import importlib, sys
+    try:
+        if "app.tg_proxy_bot" in sys.modules:
+            mod = sys.modules["app.tg_proxy_bot"]
+        elif "app.tg_bot" in sys.modules:
+            mod = sys.modules["app.tg_bot"]
+        elif os.path.exists(os.path.join(BASE_DIR, "app", "tg_proxy_bot.py")):
+            sys.path.insert(0, BASE_DIR)
+            mod = importlib.import_module("app.tg_proxy_bot")
+        elif os.path.exists(os.path.join(BASE_DIR, "app", "tg_bot.py")):
+            sys.path.insert(0, BASE_DIR)
+            mod = importlib.import_module("app.tg_bot")
+        else:
+            return jsonify({"ok": 0, "error": "Telegram бот не установлен"}), 400
+        chats = mod.get_enabled_chats()
+        if not chats:
+            return jsonify({"ok": 0, "error": "Нет активных получателей"}), 400
+        cfg = mod.get_config()
+        monitor_url = cfg.get("monitor_url", "") if cfg else ""
+        msg = mod.format_test_message(monitor_url)
+        ok = mod.send_telegram_message(chats[0]["chat_id"], msg)
+        return jsonify({"ok": 1 if ok else 0})
+    except Exception as e:
+        return jsonify({"ok": 0, "error": str(e)}), 500
+
+
+@app.route("/api/mail/recipients", methods=["GET", "POST", "PUT", "DELETE"])
+def api_mail_recipients():
+    conn = get_db()
+    if request.method == "GET":
+        try:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM mail_recipients ORDER BY id").fetchall()]
+        except Exception:
+            rows = []
+        conn.close()
+        return jsonify(rows)
+    if not session.get("logged_in"):
+        conn.close()
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    data = {}
+    if request.content_type and "application/json" in request.content_type:
+        data = request.get_json(silent=True) or {}
+    if request.method == "POST":
+        email = data.get("email", "").strip()
+        if not email or "@" not in email:
+            conn.close()
+            return jsonify({"ok": 0, "error": "Некорректный email"}), 400
+        conn.execute("INSERT OR IGNORE INTO mail_recipients (email, name) VALUES (?, ?)",
+                     (email, data.get("name", "").strip()))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": 1})
+    elif request.method == "PUT":
+        if "enabled" in data and len(data) == 2:
+            conn.execute("UPDATE mail_recipients SET enabled=? WHERE id=?",
+                (data.get("enabled"), data.get("id")))
+        else:
+            conn.execute("UPDATE mail_recipients SET email=?, name=?, enabled=? WHERE id=?",
+                (data.get("email"), data.get("name",""), data.get("enabled",1), data.get("id")))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": 1})
+    elif request.method == "DELETE":
+        conn.execute("DELETE FROM mail_recipients WHERE id=?", (request.args.get("id"),))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": 1})
+    conn.close()
+    return jsonify({"ok": 0}), 400
+
+
+@app.route("/api/mail/settings", methods=["GET", "POST"])
+def api_mail_settings():
+    conn = get_db()
+    if request.method == "GET":
+        try:
+            s = dict(conn.execute("SELECT key, value FROM mail_settings").fetchall())
+            s["smtp_configured"] = bool(s.get("smtp_server", "").strip())
+            # Пароль только для авторизованных
+            if not session.get("logged_in"):
+                s.pop("smtp_pass", None)
+                s.pop("smtp_user", None)
+            else:
+                if s.get("smtp_pass"):
+                    s["smtp_pass_masked"] = "\u2022" * 8
+                s.pop("smtp_pass", None)
+        except Exception:
+            s = {"smtp_configured": False}
+        conn.close()
+        return jsonify(s)
+    if not session.get("logged_in"):
+        conn.close()
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    data = request.json or {}
+    for key, value in data.items():
+        conn.execute("INSERT OR REPLACE INTO mail_settings (key, value) VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": 1})
+
+
+@app.route("/api/mail/test", methods=["POST"])
+def api_mail_test():
+    if not session.get("logged_in"):
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    import importlib, sys
+    try:
+        if os.path.exists(os.path.join(BASE_DIR, "app", "mail_bot.py")):
+            sys.path.insert(0, BASE_DIR)
+            mod = importlib.import_module("app.mail_bot")
+            recipients = mod.get_enabled_recipients()
+            if not recipients:
+                return jsonify({"ok": 0, "error": "Нет активных получателей"}), 400
+            conn = get_db()
+            s = dict(conn.execute("SELECT key, value FROM mail_settings").fetchall())
+            conn.close()
+            ok = mod.send_email(recipients[0]["email"], recipients[0].get("name",""),
+                                "Тест TRASSIR Monitor", "<p>Тестовое сообщение</p>", s)
+            return jsonify({"ok": 1 if ok else 0})
+        return jsonify({"ok": 0, "error": "Mail бот не установлен"}), 400
+    except Exception as e:
+        return jsonify({"ok": 0, "error": str(e)}), 500
 
 
 @app.route("/test-connection", methods=["POST"])
@@ -1357,9 +1693,21 @@ def test_connection():
     })
 
 
+
 # ============================================
-# ЗАПУСК ПРИЛОЖЕНИЯ
+# ВСПОМОГАТЕЛЬНЫЙ API — статус служб
 # ============================================
+
+@app.route("/api/services/status")
+def api_services_status():
+    """Возвращает статус установленных нотифайеров."""
+    import os as _os
+    return jsonify({
+        "telegram": _os.path.exists(os.path.join(BASE_DIR, "app", "tg_bot.py")) or
+                    _os.path.exists(os.path.join(BASE_DIR, "app", "tg_proxy_bot.py")),
+        "mail":     _os.path.exists(os.path.join(BASE_DIR, "app", "mail_bot.py")),
+        "telegram_proxy": _os.path.exists(os.path.join(BASE_DIR, "app", "tg_proxy_bot.py")),
+    })
 
 if __name__ != "__main__":
     # Вывод при запуске через gunicorn
@@ -1728,17 +2076,38 @@ cat > $INSTALL_DIR/templates/base.html << 'BASEEOF'
         /* ФОРМЫ                                          */
         /* ============================================ */
         .form-control, .form-select {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            color: var(--txt);
+            background: var(--bg) !important;
+            border: 1px solid var(--border) !important;
+            color: var(--txt) !important;
             border-radius: 8px;
             padding: 10px 14px;
         }
         
-        .form-control:focus {
-            border-color: var(--acc);
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
-            color: #fff;
+        .form-control:focus, .form-select:focus {
+            background: var(--bg) !important;
+            border-color: var(--acc) !important;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
+            color: #fff !important;
+        }
+
+        .form-control::placeholder {
+            color: var(--muted) !important;
+            opacity: 1 !important;
+        }
+
+        /* Автозаполнение браузера — тёмный фон */
+        .form-control:-webkit-autofill,
+        .form-control:-webkit-autofill:hover,
+        .form-control:-webkit-autofill:focus {
+            -webkit-text-fill-color: var(--txt) !important;
+            -webkit-box-shadow: 0 0 0px 1000px var(--bg) inset !important;
+            transition: background-color 5000s ease-in-out 0s;
+        }
+
+        /* Таблицы */
+        .table-dark {
+            --bs-table-bg: var(--card);
+            --bs-table-color: var(--txt);
         }
         
         /* ============================================ */
@@ -1851,9 +2220,20 @@ cat > $INSTALL_DIR/templates/base.html << 'BASEEOF'
                 <span class="live-indicator"></span>
                 <span id="clock"></span>
             </span>
-            <a href="/settings" class="btn btn-outline-light btn-sm ms-3" title="Настройки">
-                <i class="bi bi-gear"></i>
-            </a>
+            <div class="d-flex gap-2 ms-3">
+                <a href="/settings" class="btn btn-outline-light btn-sm" title="Настройки">
+                    <i class="bi bi-gear"></i>
+                </a>
+                {% if logged_in %}
+                <a href="/logout" class="btn btn-outline-warning btn-sm" title="Выйти">
+                    <i class="bi bi-box-arrow-right"></i> Выйти
+                </a>
+                {% else %}
+                <a href="/login" class="btn btn-outline-success btn-sm" title="Войти">
+                    <i class="bi bi-box-arrow-in-right"></i> Войти
+                </a>
+                {% endif %}
+            </div>
         </div>
     </nav>
     
@@ -1946,9 +2326,11 @@ cat > $INSTALL_DIR/templates/dashboard.html << 'DASHEOF'
         <span>
             <i class="bi bi-hdd-stack"></i> Серверы TRASSIR
         </span>
+        {% if logged_in %}
         <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addModal">
             <i class="bi bi-plus-lg"></i> Добавить сервер
         </button>
+        {% endif %}
     </div>
     <div class="card-body" id="serversList">
         {% if servers %}
@@ -2045,6 +2427,10 @@ cat > $INSTALL_DIR/templates/dashboard.html << 'DASHEOF'
                     
                     <!-- Кнопки управления -->
                     <div class="col-lg-2 col-md-2 text-end">
+                        <a href="/server/{{ s.s.id }}" class="btn btn-sm btn-outline-info">
+                            <i class="bi bi-graph-up"></i>
+                        </a>
+                        {% if logged_in %}
                         <button class="btn btn-sm btn-outline-warning edit-btn"
                                 data-id="{{ s.s.id }}"
                                 data-name="{{ s.s.name }}"
@@ -2053,12 +2439,10 @@ cat > $INSTALL_DIR/templates/dashboard.html << 'DASHEOF'
                                 data-ssl="{{ s.s.ssl }}">
                             <i class="bi bi-pencil"></i>
                         </button>
-                        <a href="/server/{{ s.s.id }}" class="btn btn-sm btn-outline-info">
-                            <i class="bi bi-graph-up"></i>
-                        </a>
                         <button class="btn btn-sm btn-outline-danger" onclick="deleteServer({{ s.s.id }})">
                             <i class="bi bi-trash"></i>
                         </button>
+                        {% endif %}
                     </div>
                     
                 </div>
@@ -2081,12 +2465,14 @@ cat > $INSTALL_DIR/templates/dashboard.html << 'DASHEOF'
 <!-- ============================================ -->
 <!-- ПЛАВАЮЩАЯ КНОПКА ДОБАВЛЕНИЯ                   -->
 <!-- ============================================ -->
+{% if logged_in %}
 <button class="btn btn-primary position-fixed bottom-0 end-0 m-4 rounded-circle shadow-lg"
         style="width: 56px; height: 56px; z-index: 1000;"
         data-bs-toggle="modal" data-bs-target="#addModal"
         title="Добавить сервер">
     <i class="bi bi-plus-lg fs-4"></i>
 </button>
+{% endif %}
 
 <!-- ============================================ -->
 <!-- МОДАЛЬНОЕ ОКНО: ДОБАВЛЕНИЕ СЕРВЕРА            -->
@@ -2775,33 +3161,21 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
 {% block content %}
 
 <style>
-    /* Исправление цвета текста в полях ввода на странице настроек */
     #settingsForm .form-control {
         background: #0a0d14 !important;
         border: 1px solid #252b36 !important;
         color: #d1d5db !important;
     }
-    
     #settingsForm .form-control:focus {
         background: #0a0d14 !important;
         border-color: #667eea !important;
         color: #ffffff !important;
         box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2) !important;
     }
-    
-    /* Стили для placeholder (подсказок в полях) */
-    #settingsForm .form-control::placeholder {
-        color: #6b7280 !important;
-        opacity: 1 !important;
-    }
-    
-    /* Стили для маленького текста под полями */
-    #settingsForm .text-muted {
-        color: #6b7280 !important;
-    }
+    #settingsForm .form-control::placeholder { color: #6b7280 !important; }
+    #settingsForm .text-muted { color: #6b7280 !important; }
 </style>
 
-<!-- Навигация -->
 <nav class="mb-4">
     <a href="/" class="btn btn-outline-light btn-sm">
         <i class="bi bi-arrow-left"></i> Назад на дашборд
@@ -2810,8 +3184,21 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
 
 <h2 class="mb-4"><i class="bi bi-gear"></i> Настройки системы</h2>
 
+{% if not logged_in %}
+<div class="card mb-4">
+    <div class="card-body text-center py-4">
+        <i class="bi bi-lock" style="font-size: 3rem; color: var(--muted);"></i>
+        <h5 class="mt-3" style="color: var(--muted);">Для изменения настроек необходимо войти</h5>
+        <a href="/login" class="btn btn-primary mt-2">
+            <i class="bi bi-box-arrow-in-right"></i> Войти
+        </a>
+    </div>
+</div>
+{% endif %}
+
 <div class="row g-4">
     <!-- Параметры мониторинга -->
+    {% if logged_in %}
     <div class="col-lg-6">
         <div class="card">
             <div class="card-header">
@@ -2821,119 +3208,588 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
                 <form id="settingsForm">
                     <div class="mb-3">
                         <label class="form-label">Интервал опроса (секунд)</label>
-                        <input type="number" class="form-control" name="poll_interval" 
+                        <input type="number" class="form-control" name="poll_interval"
                                value="{{ settings.poll_interval }}">
                         <small class="text-muted">Как часто опрашивать серверы TRASSIR</small>
                     </div>
-                    
                     <div class="mb-3">
                         <label class="form-label">Хранение данных (дней)</label>
-                        <input type="number" class="form-control" name="retention_days" 
+                        <input type="number" class="form-control" name="retention_days"
                                value="{{ settings.retention_days }}">
-                        <small class="text-muted">Сколько дней хранить историю и алерты</small>
                     </div>
-                    
                     <div class="row">
                         <div class="col-6">
                             <label class="form-label">CPU Warning (%)</label>
-                            <input type="number" class="form-control" name="cpu_warning" 
+                            <input type="number" class="form-control" name="cpu_warning"
                                    value="{{ settings.cpu_warning }}">
                         </div>
                         <div class="col-6">
                             <label class="form-label">CPU Critical (%)</label>
-                            <input type="number" class="form-control" name="cpu_critical" 
+                            <input type="number" class="form-control" name="cpu_critical"
                                    value="{{ settings.cpu_critical }}">
                         </div>
                     </div>
-                    
                     <div class="row mt-3">
                         <div class="col-6">
                             <label class="form-label">Архив Warning (дней)</label>
-                            <input type="number" class="form-control" name="archive_warning_days" 
+                            <input type="number" class="form-control" name="archive_warning_days"
                                    value="{{ settings.archive_warning_days }}">
                         </div>
                         <div class="col-6">
                             <label class="form-label">Архив Critical (дней)</label>
-                            <input type="number" class="form-control" name="archive_critical_days" 
+                            <input type="number" class="form-control" name="archive_critical_days"
                                    value="{{ settings.archive_critical_days }}">
                         </div>
                     </div>
-                    
                     <button type="submit" class="btn btn-primary mt-3">
                         <i class="bi bi-check-lg"></i> Сохранить настройки
                     </button>
                 </form>
             </div>
         </div>
+
+        <!-- Смена пароля -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <i class="bi bi-key"></i> Смена пароля администратора
+            </div>
+            <div class="card-body">
+                <form id="passwordForm">
+                    <div class="mb-3">
+                        <label class="form-label">Новый пароль</label>
+                        <input type="password" class="form-control" id="newPassword"
+                               placeholder="Введите новый пароль">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Подтверждение</label>
+                        <input type="password" class="form-control" id="confirmPassword"
+                               placeholder="Повторите пароль">
+                    </div>
+                    <button type="submit" class="btn btn-warning">
+                        <i class="bi bi-key"></i> Сменить пароль
+                    </button>
+                </form>
+            </div>
+        </div>
     </div>
-    
+    {% endif %}
+
     <!-- Список серверов -->
     <div class="col-lg-6">
         <div class="card">
             <div class="card-header">
-                <i class="bi bi-hdd-stack"></i> Список серверов
+                <span><i class="bi bi-hdd-stack"></i> Список серверов</span>
+                {% if logged_in %}
+                <button class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addModal">
+                    <i class="bi bi-plus-lg"></i> Добавить
+                </button>
+                {% endif %}
             </div>
             <div class="card-body">
                 {% if servers %}
-                    <table class="table table-dark table-hover">
-                        <thead>
-                            <tr>
-                                <th>Название</th>
-                                <th>IP адрес</th>
-                                <th>Порт</th>
-                                <th>Действия</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {% for server in servers %}
-                            <tr>
-                                <td>{{ server.name }}</td>
-                                <td>{{ server.ip }}</td>
-                                <td>{{ server.port }}</td>
-                                <td>
-                                    <button class="btn btn-sm btn-danger" 
-                                            onclick="if(confirm('Удалить сервер {{ server.name }}?'))fetch('/api/servers?id={{ server.id }}',{method:'DELETE'}).then(function(){location.reload()})">
-                                        <i class="bi bi-trash"></i> Удалить
-                                    </button>
-                                </td>
-                            </tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
+                <table class="table table-dark table-hover">
+                    <thead>
+                        <tr>
+                            <th>Название</th>
+                            <th>IP адрес</th>
+                            <th>Порт</th>
+                            {% if logged_in %}<th>Действия</th>{% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for server in servers %}
+                        <tr>
+                            <td>{{ server.name }}</td>
+                            <td>{{ server.ip }}</td>
+                            <td>{{ server.port }}</td>
+                            {% if logged_in %}
+                            <td>
+                                <button class="btn btn-sm btn-outline-warning edit-btn"
+                                        data-id="{{ server.id }}"
+                                        data-name="{{ server.name }}"
+                                        data-ip="{{ server.ip }}"
+                                        data-port="{{ server.port }}"
+                                        data-ssl="{{ server.ssl }}">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button class="btn btn-sm btn-danger"
+                                        onclick="if(confirm('Удалить {{ server.name }}?'))fetch('/api/servers?id={{ server.id }}',{method:'DELETE'}).then(function(){location.reload()})">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </td>
+                            {% endif %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
                 {% else %}
-                    <p class="text-muted text-center py-3">Нет добавленных серверов</p>
+                <p class="text-muted text-center py-3">Нет добавленных серверов</p>
                 {% endif %}
             </div>
         </div>
     </div>
 </div>
 
+{% if logged_in %}
+<!-- Модальное окно добавления сервера -->
+<div class="modal fade" id="addModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-plus-circle"></i> Добавить сервер</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="addForm">
+                    <div class="mb-3">
+                        <label class="form-label">Название *</label>
+                        <input type="text" class="form-control" name="name" required placeholder="Главный офис">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">IP адрес *</label>
+                        <input type="text" class="form-control" name="ip" required placeholder="192.168.1.100">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Порт</label>
+                        <input type="number" class="form-control" name="port" value="8080">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">SDK Пароль</label>
+                        <input type="password" class="form-control" name="sdk_password"
+                               placeholder="Настройки TRASSIR → Веб-сервер → Пароль SDK">
+                    </div>
+                    <div class="form-check mb-3">
+                        <input type="checkbox" class="form-check-input" name="ssl" checked>
+                        <label class="form-check-label">Использовать SSL</label>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button type="button" class="btn btn-outline-info" onclick="testConnection()">
+                            <i class="bi bi-lightning"></i> Проверить
+                        </button>
+                        <button type="submit" class="btn btn-primary flex-grow-1">
+                            <i class="bi bi-plus-lg"></i> Добавить
+                        </button>
+                    </div>
+                    <div id="testResult" class="mt-3" style="display:none;"></div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Модальное окно редактирования -->
+<div class="modal fade" id="editModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-pencil"></i> Изменить сервер</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <form id="editForm">
+                    <input type="hidden" name="id" id="editId">
+                    <div class="mb-3">
+                        <label class="form-label">Название</label>
+                        <input type="text" class="form-control" name="name" id="editName" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">IP адрес</label>
+                        <input type="text" class="form-control" name="ip" id="editIp" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Порт</label>
+                        <input type="number" class="form-control" name="port" id="editPort">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Новый SDK пароль (пусто = не менять)</label>
+                        <input type="password" class="form-control" name="sdk_password" id="editPassword">
+                    </div>
+                    <div class="form-check mb-3">
+                        <input type="checkbox" class="form-check-input" name="ssl" id="editSsl">
+                        <label class="form-check-label">Использовать SSL</label>
+                    </div>
+                    <button type="submit" class="btn btn-warning w-100">
+                        <i class="bi bi-check-lg"></i> Сохранить
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- Telegram и Mail секции -->
+<div class="row g-4 mt-0">
+<!-- Telegram секция — показывается если служба установлена -->
+<div class="col-lg-6" id="telegramSection" style="display:none;">
+    <div class="card">
+        <div class="card-header">
+            <span><i class="bi bi-telegram"></i> Telegram уведомления</span>
+        </div>
+        <div class="card-body" id="telegramBody">
+            {% if not logged_in %}
+            <div class="text-center py-3">
+                <i class="bi bi-lock" style="color:var(--muted);font-size:2rem;"></i>
+                <p class="mt-2" style="color:var(--muted);">Войдите для управления Telegram</p>
+                <a href="/login" class="btn btn-primary btn-sm">Войти</a>
+            </div>
+            {% else %}
+            <p style="color:var(--muted);">Загрузка...</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Mail секция — показывается если служба установлена -->
+<div class="col-lg-6" id="mailSection" style="display:none;">
+    <div class="card">
+        <div class="card-header">
+            <span><i class="bi bi-envelope"></i> Email уведомления</span>
+        </div>
+        <div class="card-body" id="mailBody">
+            {% if not logged_in %}
+            <div class="text-center py-3">
+                <i class="bi bi-lock" style="color:var(--muted);font-size:2rem;"></i>
+                <p class="mt-2" style="color:var(--muted);">Войдите для управления Email</p>
+                <a href="/login" class="btn btn-primary btn-sm">Войти</a>
+            </div>
+            {% else %}
+            <p style="color:var(--muted);">Загрузка...</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
 <script>
+{% if logged_in %}
+// Сохранение настроек мониторинга
 document.getElementById('settingsForm').addEventListener('submit', async function(e) {
     e.preventDefault();
-    
-    var formData = new FormData(this);
-    var data = Object.fromEntries(formData);
-    
-    var response = await fetch('/api/settings', {
+    var data = Object.fromEntries(new FormData(this));
+    var r = await fetch('/api/settings', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data)
     });
-    
-    if (response.ok) {
-        alert('Настройки сохранены! Изменения вступят в силу при следующем опросе.');
-    } else {
-        alert('Ошибка при сохранении настроек');
+    alert(r.ok ? 'Настройки сохранены!' : 'Ошибка при сохранении');
+});
+
+// Смена пароля
+document.getElementById('passwordForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var p1 = document.getElementById('newPassword').value;
+    var p2 = document.getElementById('confirmPassword').value;
+    if (!p1) { alert('Введите пароль'); return; }
+    if (p1 !== p2) { alert('Пароли не совпадают'); return; }
+    var r = await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({admin_password: p1})
+    });
+    if (r.ok) {
+        alert('Пароль изменён!');
+        document.getElementById('newPassword').value = '';
+        document.getElementById('confirmPassword').value = '';
     }
 });
+
+// Добавление сервера
+document.getElementById('addForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var data = Object.fromEntries(new FormData(this));
+    data.port = parseInt(data.port);
+    data.ssl = data.ssl === 'on';
+    var r = await fetch('/api/servers', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    });
+    if (r.ok) location.reload();
+    else alert('Ошибка при добавлении');
+});
+
+// Редактирование
+document.querySelectorAll('.edit-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+        document.getElementById('editId').value = this.dataset.id;
+        document.getElementById('editName').value = this.dataset.name;
+        document.getElementById('editIp').value = this.dataset.ip;
+        document.getElementById('editPort').value = this.dataset.port;
+        document.getElementById('editSsl').checked = (this.dataset.ssl === '1' || this.dataset.ssl === 'True');
+        document.getElementById('editPassword').value = '';
+        new bootstrap.Modal(document.getElementById('editModal')).show();
+    });
+});
+
+document.getElementById('editForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var data = Object.fromEntries(new FormData(this));
+    data.port = parseInt(data.port);
+    data.ssl = data.ssl === 'on';
+    data.id = parseInt(data.id);
+    var r = await fetch('/api/servers', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    });
+    if (r.ok) location.reload();
+    else alert('Ошибка при сохранении');
+});
+
+async function testConnection() {
+    var data = Object.fromEntries(new FormData(document.getElementById('addForm')));
+    data.port = parseInt(data.port);
+    data.ssl = data.ssl === 'on';
+    var resultDiv = document.getElementById('testResult');
+    resultDiv.style.display = 'block';
+    resultDiv.innerHTML = '<div class="alert alert-info">Проверка...</div>';
+    try {
+        var r = await fetch('/test-connection', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        });
+        var result = await r.json();
+        if (result.success) {
+            resultDiv.innerHTML = '<div class="alert alert-success">✅ Подключение успешно! Камер: ' +
+                (result.data?.channels_online||0) + '/' + (result.data?.channels_total||0) + '</div>';
+        } else {
+            resultDiv.innerHTML = '<div class="alert alert-danger">❌ ' + (result.error||'Ошибка') + '</div>';
+        }
+    } catch(e) {
+        resultDiv.innerHTML = '<div class="alert alert-danger">Ошибка: ' + e.message + '</div>';
+    }
+}
+{% endif %}
+
+// ============================================
+// TELEGRAM И MAIL — загружаем если установлены
+// ============================================
+var servicesLoaded = false;
+
+async function loadServices() {
+    if (servicesLoaded) return;
+    servicesLoaded = true;
+    try {
+        var r = await fetch('/api/services/status');
+        var s = await r.json();
+        if (s.telegram) {
+            document.getElementById('telegramSection').style.display = 'block';
+            {% if logged_in %}loadTelegramSection();{% endif %}
+        }
+        if (s.mail) {
+            document.getElementById('mailSection').style.display = 'block';
+            {% if logged_in %}loadMailSection();{% endif %}
+        }
+    } catch(e) {}
+}
+
+async function loadTelegramSection() {
+    var sec = document.getElementById('telegramSection');
+    if (!sec) return;
+    sec.style.display = 'block';
+    {% if logged_in %}
+    try {
+        var r = await fetch('/api/telegram/chats');
+        var chats = await r.json();
+        var rs = await fetch('/api/telegram/settings');
+        var cfg = await rs.json();
+        renderTelegram(chats, cfg);
+    } catch(e) { console.error(e); }
+    {% endif %}
+}
+
+function renderTelegram(chats, cfg) {
+    var html = '';
+    if (cfg.token_configured) {
+        html += '<div class="alert alert-success py-2 mb-3">✅ Токен: ' + (cfg.token_masked||'настроен') + '</div>';
+    } else {
+        html += '<div class="alert alert-warning py-2 mb-3">⚠️ Токен не настроен</div>';
+    }
+    if (cfg.proxy_url) {
+        html += '<div class="mb-2" style="color:var(--muted);font-size:0.85rem;">Прокси: ' + cfg.proxy_url + '</div>';
+    }
+    html += '<div class="mb-3"><strong>Получатели:</strong></div>';
+    if (chats.length) {
+        chats.forEach(function(c) {
+            var enabled = c.enabled == 1;
+            html += '<div class="d-flex justify-content-between align-items-center mb-2 p-2" style="background:var(--bg);border-radius:8px;opacity:' + (enabled?'1':'0.5') + '">' +
+                '<span>' + (c.name || '<span style="color:var(--muted)">без имени</span>') +
+                ' <small style="color:var(--muted);">(' + c.chat_id + ')</small></span>' +
+                '<div class="d-flex gap-1">' +
+                '<button class="btn btn-sm ' + (enabled ? 'btn-success' : 'btn-outline-secondary') + '" onclick="toggleTgChat(' + c.id + ',' + (enabled?0:1) + ')" title="' + (enabled?'Выключить':'Включить') + '">' +
+                '<i class="bi bi-' + (enabled?'bell':'bell-slash') + '"></i></button>' +
+                '<button class="btn btn-sm btn-outline-danger" onclick="deleteTgChat(' + c.id + ')"><i class="bi bi-trash"></i></button>' +
+                '</div></div>';
+        });
+    } else {
+        html += '<p style="color:var(--muted);">Нет получателей</p>';
+    }
+    html += '<div class="d-flex gap-2 mt-3">' +
+        '<input type="text" id="newChatId" class="form-control" placeholder="Chat ID">' +
+        '<input type="text" id="newChatName" class="form-control" placeholder="Имя">' +
+        '<button class="btn btn-primary" onclick="addTgChat()"><i class="bi bi-plus"></i></button>' +
+        '</div>' +
+        '<button class="btn btn-outline-info btn-sm mt-2" onclick="testTelegram()"><i class="bi bi-send"></i> Тест</button>' +
+        '<div id="tgTestResult" class="mt-2"></div>';
+    document.getElementById('telegramBody').innerHTML = html;
+}
+
+async function addTgChat() {
+    var chat_id = document.getElementById('newChatId').value.trim();
+    var name = document.getElementById('newChatName').value.trim();
+    if (!chat_id) { alert('Введите Chat ID'); return; }
+    var r = await fetch('/api/telegram/chats', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({chat_id,name})});
+    var d = await r.json();
+    if (d.ok) { loadTelegramSection(); } else { alert(d.error); }
+}
+
+async function toggleTgChat(id, enabled) {
+    await fetch('/api/telegram/chats', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, enabled})});
+    loadTelegramSection();
+}
+
+async function deleteTgChat(id) {
+    if (!confirm('Удалить получателя?')) return;
+    await fetch('/api/telegram/chats?id='+id, {method:'DELETE'});
+    loadTelegramSection();
+}
+
+async function testTelegram() {
+    document.getElementById('tgTestResult').innerHTML = '<small style="color:var(--muted);">Отправка...</small>';
+    var r = await fetch('/api/telegram/test', {method:'POST'});
+    var d = await r.json();
+    document.getElementById('tgTestResult').innerHTML = d.ok ?
+        '<small style="color:var(--green);">✅ ' + d.message + '</small>' :
+        '<small style="color:var(--red);">❌ ' + d.error + '</small>';
+}
+
+async function loadMailSection() {
+    var sec = document.getElementById('mailSection');
+    if (!sec) return;
+    sec.style.display = 'block';
+    {% if logged_in %}
+    try {
+        var r = await fetch('/api/mail/recipients');
+        var recipients = await r.json();
+        var rs = await fetch('/api/mail/settings');
+        var cfg = await rs.json();
+        renderMail(recipients, cfg);
+    } catch(e) { console.error(e); }
+    {% endif %}
+}
+
+function renderMail(recipients, cfg) {
+    var html = '';
+    if (cfg.smtp_configured) {
+        html += '<div class="alert alert-success py-2 mb-3">✅ SMTP настроен: ' + (cfg.smtp_server||'') + '</div>';
+    } else {
+        html += '<div class="alert alert-warning py-2 mb-3">⚠️ SMTP не настроен</div>';
+    }
+    html += '<div class="mb-3"><strong>Получатели:</strong></div>';
+    if (recipients.length) {
+        recipients.forEach(function(r) {
+            var enabled = r.enabled == 1;
+            html += '<div class="d-flex justify-content-between align-items-center mb-2 p-2" style="background:var(--bg);border-radius:8px;opacity:' + (enabled?'1':'0.5') + '">' +
+                '<span>' + (r.name || '<span style="color:var(--muted)">без имени</span>') +
+                ' <small style="color:var(--muted);">(' + r.email + ')</small></span>' +
+                '<div class="d-flex gap-1">' +
+                '<button class="btn btn-sm ' + (enabled ? 'btn-success' : 'btn-outline-secondary') + '" onclick="toggleMailRecipient(' + r.id + ',' + (enabled?0:1) + ')" title="' + (enabled?'Выключить':'Включить') + '">' +
+                '<i class="bi bi-' + (enabled?'bell':'bell-slash') + '"></i></button>' +
+                '<button class="btn btn-sm btn-outline-danger" onclick="deleteMailRecipient(' + r.id + ')"><i class="bi bi-trash"></i></button>' +
+                '</div></div>';
+        });
+    } else {
+        html += '<p style="color:var(--muted);">Нет получателей</p>';
+    }
+    html += '<div class="d-flex gap-2 mt-3">' +
+        '<input type="email" id="newEmail" class="form-control" placeholder="email@example.com">' +
+        '<input type="text" id="newEmailName" class="form-control" placeholder="Имя">' +
+        '<button class="btn btn-primary" onclick="addMailRecipient()"><i class="bi bi-plus"></i></button>' +
+        '</div>' +
+        '<button class="btn btn-outline-info btn-sm mt-2" onclick="testMail()"><i class="bi bi-envelope"></i> Тест</button>' +
+        '<div id="mailTestResult" class="mt-2"></div>';
+    document.getElementById('mailBody').innerHTML = html;
+}
+
+async function addMailRecipient() {
+    var email = document.getElementById('newEmail').value.trim();
+    var name = document.getElementById('newEmailName').value.trim();
+    if (!email) { alert('Введите email'); return; }
+    var r = await fetch('/api/mail/recipients', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email,name})});
+    var d = await r.json();
+    if (d.ok) { loadMailSection(); } else { alert(d.error); }
+}
+
+async function toggleMailRecipient(id, enabled) {
+    await fetch('/api/mail/recipients', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, enabled})});
+    loadMailSection();
+}
+
+async function deleteMailRecipient(id) {
+    if (!confirm('Удалить получателя?')) return;
+    await fetch('/api/mail/recipients?id='+id, {method:'DELETE'});
+    loadMailSection();
+}
+
+async function testMail() {
+    document.getElementById('mailTestResult').innerHTML = '<small style="color:var(--muted);">Отправка...</small>';
+    var r = await fetch('/api/mail/test', {method:'POST'});
+    var d = await r.json();
+    document.getElementById('mailTestResult').innerHTML = d.ok ?
+        '<small style="color:var(--green);">✅ ' + d.message + '</small>' :
+        '<small style="color:var(--red);">❌ ' + d.error + '</small>';
+}
+
+// Загружаем статус служб при открытии страницы
+loadServices();
 </script>
 {% endblock %}
 SETTINGSEOF
 echo "    ✓ settings.html создан ($(wc -c < $INSTALL_DIR/templates/settings.html) байт)"
+
+# ---------- login.html ----------
+echo "  • Создание login.html..."
+cat > $INSTALL_DIR/templates/login.html << 'LOGINEOF'
+{% extends "base.html" %}
+{% block title %}Вход — TRASSIR Monitor{% endblock %}
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <i class="bi bi-lock"></i> Вход в систему
+            </div>
+            <div class="card-body">
+                {% if error %}
+                <div class="alert alert-danger mb-3">{{ error }}</div>
+                {% endif %}
+                <form method="POST">
+                    <div class="mb-3">
+                        <label class="form-label">Пароль администратора</label>
+                        <input type="password" class="form-control" name="password"
+                               autofocus placeholder="Введите пароль">
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">
+                        <i class="bi bi-box-arrow-in-right"></i> Войти
+                    </button>
+                </form>
+                <div class="mt-3 text-center">
+                    <a href="/" style="color: var(--muted); font-size: 0.85rem;">
+                        ← Вернуться на дашборд
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+LOGINEOF
+echo "    ✓ login.html создан ($(wc -c < $INSTALL_DIR/templates/login.html) байт)"
 
 echo ""
 echo -e "${GREEN}✅ Все шаблоны созданы${NC}"
@@ -3217,7 +4073,11 @@ echo -e "   • Uptime в днях и часах"
 echo -e "   • Время отклика в миллисекундах"
 echo -e "   • Настройка порогов алертов"
 echo ""
-echo -e "${BOLD}🔧 Управление:${NC}"
+echo -e "${BOLD}🔐 Авторизация:${NC}"
+echo -e "   Войти: ${CYAN}http://${IP}:${WEB_PORT}/login${NC}"
+echo -e "   Пароль по умолчанию: ${YELLOW}admin${NC}"
+echo -e "   ${RED}⚠ Смените пароль в Настройки → Смена пароля!${NC}"
+echo ""
 echo -e "   Статус сервиса: ${YELLOW}systemctl status $SERVICE${NC}"
 echo -e "   Просмотр логов: ${YELLOW}journalctl -u $SERVICE -f${NC}"
 echo -e "   Лог камер:      ${YELLOW}tail -f $INSTALL_DIR/logs/collect.log${NC}"
