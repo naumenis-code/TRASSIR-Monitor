@@ -3684,36 +3684,178 @@ async function loadMailSection() {
 }
 
 function renderMail(recipients, cfg) {
-    var html = '';
-    if (cfg.smtp_configured) {
-        html += '<div class="alert alert-success py-2 mb-3">✅ SMTP настроен: ' + (cfg.smtp_server||'') + '</div>';
-    } else {
-        html += '<div class="alert alert-warning py-2 mb-3">⚠️ SMTP не настроен</div>';
-    }
-    html += '<div class="mb-3"><strong>Получатели:</strong></div>';
+    var enabled = cfg.enabled === "1";
+    var smtpOk  = cfg.smtp_configured;
+
+    // Статус бейдж
+    var badge = smtpOk && enabled
+        ? "<span class='badge bg-success fs-6'>✅ Активен</span>"
+        : enabled
+            ? "<span class='badge bg-warning fs-6'>⚠ Нет SMTP</span>"
+            : "<span class='badge bg-secondary fs-6'>⏸ Выключен</span>";
+
+    // SMTP инфо
+    var smtpInfo = smtpOk
+        ? "<b>SMTP:</b> <span style='color:var(--green)'>" + (cfg.smtp_server||"?") + ":" + (cfg.smtp_port||"587") + "</span>" +
+          (cfg.smtp_user ? " | <b>Логин:</b> " + cfg.smtp_user : "") +
+          (cfg.monitor_url ? "<br><b>URL:</b> " + cfg.monitor_url : "")
+        : "<span style='color:var(--red)'>❌ SMTP не настроен</span>";
+
+    // Список получателей
+    var rcptHtml = "";
     if (recipients.length) {
         recipients.forEach(function(r) {
-            var enabled = r.enabled == 1;
-            html += '<div class="d-flex justify-content-between align-items-center mb-2 p-2" style="background:var(--bg);border-radius:8px;opacity:' + (enabled?'1':'0.5') + '">' +
-                '<span>' + (r.name || '<span style="color:var(--muted)">без имени</span>') +
-                ' <small style="color:var(--muted);">(' + r.email + ')</small></span>' +
-                '<div class="d-flex gap-1">' +
-                '<button class="btn btn-sm ' + (enabled ? 'btn-success' : 'btn-outline-secondary') + '" onclick="toggleMailRecipient(' + r.id + ',' + (enabled?0:1) + ')" title="' + (enabled?'Выключить':'Включить') + '">' +
-                '<i class="bi bi-' + (enabled?'bell':'bell-slash') + '"></i></button>' +
-                '<button class="btn btn-sm btn-outline-danger" onclick="deleteMailRecipient(' + r.id + ')"><i class="bi bi-trash"></i></button>' +
-                '</div></div>';
+            rcptHtml += "<div style='display:flex;justify-content:space-between;align-items:center;" +
+                "margin-bottom:4px;padding:6px 10px;background:var(--bg);border-radius:6px;" +
+                "opacity:" + (r.enabled ? "1" : "0.5") + "'>" +
+                "<div><span class='badge bg-" + (r.enabled ? "success" : "secondary") + " me-1'>" +
+                (r.enabled ? "вкл" : "выкл") + "</span>" +
+                "<b>" + (r.name || "без имени") + "</b> " +
+                "<code style='font-size:11px'>" + r.email + "</code></div>" +
+                "<div>" +
+                "<button class='btn btn-sm btn-outline-" + (r.enabled ? "success" : "secondary") + " me-1' " +
+                "onclick='mailToggleRcpt(" + r.id + "," + (r.enabled ? 0 : 1) + ")' title='" + (r.enabled ? "Выключить" : "Включить") + "'>" +
+                "<i class='bi bi-" + (r.enabled ? "bell" : "bell-slash") + "'></i></button>" +
+                "<button class='btn btn-sm btn-outline-info me-1' onclick='mailEditRcpt(" + r.id + ")' title='Редактировать'>&#9999;</button>" +
+                "<button class='btn btn-sm btn-outline-danger' onclick='mailDeleteRcpt(" + r.id + ")' title='Удалить'>&#10005;</button>" +
+                "</div></div>";
         });
     } else {
-        html += '<p style="color:var(--muted);">Нет получателей</p>';
+        rcptHtml = "<p style='color:var(--muted)'>Нет получателей</p>";
     }
-    html += '<div class="d-flex gap-2 mt-3">' +
-        '<input type="email" id="newEmail" class="form-control" placeholder="email@example.com">' +
-        '<input type="text" id="newEmailName" class="form-control" placeholder="Имя">' +
-        '<button class="btn btn-primary" onclick="addMailRecipient()"><i class="bi bi-plus"></i></button>' +
-        '</div>' +
-        '<button class="btn btn-outline-info btn-sm mt-2" onclick="testMail()"><i class="bi bi-envelope"></i> Тест</button>' +
-        '<div id="mailTestResult" class="mt-2"></div>';
+
+    var html =
+        "<div class='card-header d-flex justify-content-between align-items-center' style='background:rgba(102,126,234,0.05);border-bottom:1px solid var(--border);padding:16px 24px;font-weight:600'>" +
+        "<span><i class='bi bi-envelope'></i> Email уведомления</span>" + badge + "</div>" +
+        "<div class='card-body'>" +
+        "<style>.mfc{color:#fff!important;background:#1a1d27!important;border-color:#2d3239!important;}.mfc::placeholder{color:#6b7280!important;}</style>" +
+        "<div id='mailSmtpInfo' class='mb-3 p-3 rounded' style='background:var(--bg)'>" + smtpInfo + "</div>" +
+        "<div class='mb-2'><a href='#mailSmtpForm' data-bs-toggle='collapse' class='btn btn-outline-secondary btn-sm w-100'>" +
+        "<i class='bi bi-gear'></i> Настроить SMTP сервер</a></div>" +
+        "<div class='collapse mb-3' id='mailSmtpForm'>" +
+        "<div class='p-3 rounded' style='background:var(--bg);border:1px solid #2d3239'>" +
+        "<div class='row g-2'>" +
+        "<div class='col-8'><label class='form-label small'>SMTP сервер</label>" +
+        "<input type='text' class='form-control form-control-sm mfc' id='mailSmtpServer' value='" + (cfg.smtp_server||"") + "' placeholder='smtp.gmail.com'></div>" +
+        "<div class='col-4'><label class='form-label small'>Порт</label>" +
+        "<input type='number' class='form-control form-control-sm mfc' id='mailSmtpPort' value='" + (cfg.smtp_port||"587") + "'></div>" +
+        "<div class='col-6'><label class='form-label small'>Логин</label>" +
+        "<input type='text' class='form-control form-control-sm mfc' id='mailSmtpUser' value='" + (cfg.smtp_user||"") + "' placeholder='user@domain.com'></div>" +
+        "<div class='col-6'><label class='form-label small'>Пароль</label>" +
+        "<input type='password' class='form-control form-control-sm mfc' id='mailSmtpPass' placeholder='••••••••'></div>" +
+        "<div class='col-6'><label class='form-label small'>Имя отправителя</label>" +
+        "<input type='text' class='form-control form-control-sm mfc' id='mailFromName' value='" + (cfg.from_name||"TRASSIR Monitor") + "'></div>" +
+        "<div class='col-6'><label class='form-label small'>Email отправителя</label>" +
+        "<input type='text' class='form-control form-control-sm mfc' id='mailFromAddr' value='" + (cfg.from_addr||"") + "' placeholder='monitor@domain.com'></div>" +
+        "<div class='col-12'><label class='form-label small'>URL монитора (для ссылок в письмах)</label>" +
+        "<input type='text' class='form-control form-control-sm mfc' id='mailMonitorUrl' value='" + (cfg.monitor_url||"") + "' placeholder='http://192.168.1.100:8080'></div>" +
+        "<div class='col-12'><button class='btn btn-primary btn-sm w-100' onclick='mailSaveSmtp()'>" +
+        "<i class='bi bi-check-lg'></i> Сохранить SMTP</button></div>" +
+        "</div><small class='text-muted d-block mt-2'>Gmail: используйте пароль приложения (App Password)</small>" +
+        "</div></div>" +
+        "<div class='mb-3'><label class='form-label'>📬 Получатели уведомлений:</label>" +
+        "<div id='mailRcptList' class='mb-3' style='max-height:200px;overflow-y:auto'>" + rcptHtml + "</div>" +
+        "<div class='input-group input-group-sm mb-2'>" +
+        "<input type='email' class='form-control mfc' id='mailNewEmail' placeholder='email@domain.com'>" +
+        "<input type='text' class='form-control mfc' id='mailNewName' placeholder='Имя'>" +
+        "<button class='btn btn-primary' onclick='mailAddRecipient()'><i class='bi bi-plus-lg'></i></button>" +
+        "</div></div>" +
+        "<div class='form-check form-switch mb-3'>" +
+        "<input class='form-check-input' type='checkbox' id='mailEnabled' " + (enabled ? "checked" : "") + " onchange='mailSaveEnabled()'>" +
+        "<label class='form-check-label'><b>Включить Email уведомления</b></label></div>" +
+        "<div class='d-flex gap-2'>" +
+        "<button class='btn btn-outline-info btn-sm' onclick='mailTest()'><i class='bi bi-send'></i> Тест</button>" +
+        "<button class='btn btn-outline-secondary btn-sm' onclick='loadMailSection()'><i class='bi bi-arrow-clockwise'></i> Обновить</button>" +
+        "</div><div id='mailResult' class='mt-2' style='display:none'></div>" +
+        "</div>";
+
     document.getElementById('mailBody').innerHTML = html;
+}
+
+async function mailSaveSmtp() {
+    var data = {
+        smtp_server: document.getElementById('mailSmtpServer').value.trim(),
+        smtp_port:   document.getElementById('mailSmtpPort').value.trim() || '587',
+        smtp_user:   document.getElementById('mailSmtpUser').value.trim(),
+        from_name:   document.getElementById('mailFromName').value.trim() || 'TRASSIR Monitor',
+        from_addr:   document.getElementById('mailFromAddr').value.trim(),
+        monitor_url: document.getElementById('mailMonitorUrl').value.trim()
+    };
+    var pass = document.getElementById('mailSmtpPass').value;
+    if (pass) data.smtp_pass = pass;
+    var r = await fetch('/api/mail/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    var d = await r.json();
+    mailShowResult(d.ok ? 'SMTP сохранён' : (d.error||'Ошибка'), d.ok ? 'success' : 'danger');
+    if (d.ok) loadMailSection();
+}
+
+async function mailSaveEnabled() {
+    var val = document.getElementById('mailEnabled').checked ? '1' : '0';
+    await fetch('/api/mail/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled: val})});
+    loadMailSection();
+}
+
+async function mailAddRecipient() {
+    var email = document.getElementById('mailNewEmail').value.trim();
+    var name  = document.getElementById('mailNewName').value.trim();
+    if (!email) { alert('Введите email адрес'); return; }
+    var r = await fetch('/api/mail/recipients', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({email, name})});
+    var d = await r.json();
+    if (d.ok) {
+        document.getElementById('mailNewEmail').value = '';
+        document.getElementById('mailNewName').value  = '';
+        loadMailSection();
+    } else {
+        mailShowResult(d.error, 'danger');
+    }
+}
+
+async function mailToggleRcpt(id, enabled) {
+    await fetch('/api/mail/recipients', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id, enabled})});
+    loadMailSection();
+}
+
+async function mailEditRcpt(dbId) {
+    var r = await fetch('/api/mail/recipients');
+    var list = await r.json();
+    var rec = list.find(function(x){ return x.id === dbId; });
+    if (!rec) return;
+    var newEmail = prompt('Email адрес:', rec.email);
+    if (newEmail === null) return;
+    var newName = prompt('Имя:', rec.name || '');
+    if (newName === null) return;
+    var data = {id: dbId, name: newName||'', enabled: rec.enabled};
+    if (newEmail.trim() && newEmail.trim() !== rec.email) data.email = newEmail.trim();
+    var res = await fetch('/api/mail/recipients', {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    var d = await res.json();
+    if (d.ok) loadMailSection(); else mailShowResult(d.error, 'danger');
+}
+
+async function mailDeleteRcpt(id) {
+    if (!confirm('Удалить получателя?')) return;
+    await fetch('/api/mail/recipients?id=' + id, {method:'DELETE'});
+    loadMailSection();
+}
+
+async function mailTest() {
+    var e = document.getElementById('mailResult');
+    e.style.display = 'block';
+    e.className = 'mt-2 alert alert-info';
+    e.textContent = 'Отправка тестового письма...';
+    var r = await fetch('/api/mail/test', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    var d = await r.json();
+    e.className = 'mt-2 alert alert-' + (d.ok ? 'success' : 'danger');
+    e.textContent = d.ok ? d.message : d.error;
+    setTimeout(function(){ e.style.display = 'none'; }, 6000);
+}
+
+function mailShowResult(msg, type) {
+    var e = document.getElementById('mailResult');
+    if (!e) return;
+    e.style.display = 'block';
+    e.className = 'mt-2 alert alert-' + type;
+    e.textContent = msg;
+    setTimeout(function(){ e.style.display = 'none'; }, 5000);
 }
 
 async function addMailRecipient() {
