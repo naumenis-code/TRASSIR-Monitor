@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor v12.0
-# Проверено на Debian 12
+# TRASSIR Monitor v13.0
+# Проверено на Debian 12 13
 # ============================================
 set -e
 
@@ -25,7 +25,7 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}║   TRASSIR Monitor v12.0 — Final Complete     ║${NC}"
 echo -e "${GREEN}║   Имена каналов • Алерты • Live дашборд      ║${NC}"
-echo -e "${GREEN}║   Debian 12/13 • gevent • Python 3.12/3.13  ║${NC}"
+echo -e "${GREEN}║   Debian 12/13 • gevent • Python 3.12/3.13   ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""
@@ -4166,13 +4166,28 @@ echo ""
 echo "  • Запуск сервисов..."
 NGINX_BIN=$(command -v nginx || echo "/usr/sbin/nginx")
 
-# Включаем network-online.target чтобы сервисы ждали полного поднятия сети
+# Включаем network-online.target
 systemctl enable systemd-networkd-wait-online.service 2>/dev/null || \
 systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
 
-
-systemctl enable $SERVICE
+# Перезагружаем конфиги systemd
 systemctl daemon-reload
+
+# Регистрируем автозапуск
+systemctl enable $SERVICE 2>/dev/null || true
+
+# Проверяем что enable сработал
+IS_ENABLED=$(systemctl is-enabled $SERVICE 2>/dev/null || echo "unknown")
+if [ "$IS_ENABLED" = "enabled" ]; then
+    echo "    ✓ Автозапуск при загрузке: включён"
+else
+    echo "    ⚠ Повторная попытка enable..."
+    ln -sf /etc/systemd/system/$SERVICE.service \
+           /etc/systemd/system/multi-user.target.wants/$SERVICE.service 2>/dev/null || true
+    systemctl daemon-reload
+    echo "    ✓ Симлинк создан вручную"
+fi
+
 systemctl restart $SERVICE
 systemctl restart nginx 2>/dev/null || $NGINX_BIN -s reload 2>/dev/null || true
 echo "    ✓ Сервисы запущены"
