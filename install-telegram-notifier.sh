@@ -1144,7 +1144,14 @@ touch "$LOG_DIR/tgbot.log" "$LOG_DIR/tgbot-error.log" 2>/dev/null
 chown www-data:www-data "$LOG_DIR/tgbot.log" "$LOG_DIR/tgbot-error.log" 2>/dev/null || true
 
 systemctl daemon-reload
-systemctl enable "$SERVICE_BOT" 2>/dev/null
+systemctl enable "$SERVICE_BOT" 2>/dev/null || true
+
+IS_ENABLED=$(systemctl is-enabled "$SERVICE_BOT" 2>/dev/null || echo "unknown")
+if [ "$IS_ENABLED" != "enabled" ]; then
+    SVC_FILE="/etc/systemd/system/$SERVICE_BOT.service"
+    [ -f "$SVC_FILE" ] && ln -sf "$SVC_FILE" /etc/systemd/system/multi-user.target.wants/ 2>/dev/null || true
+    systemctl daemon-reload
+fi
 
 echo "  • Сервис: /etc/systemd/system/$SERVICE_BOT.service"
 echo "  • Логи:   $LOG_DIR/tgbot.log"
@@ -1170,7 +1177,7 @@ MAIN_STATUS=$(systemctl is-active "$SERVICE_MAIN" 2>/dev/null || echo "inactive"
 echo "    Статус: $MAIN_STATUS"
 
 echo "  • Запуск Telegram Bot..."
-systemctl start "$SERVICE_BOT"
+systemctl start "$SERVICE_BOT" 2>/dev/null || true
 sleep 3
 BOT_STATUS=$(systemctl is-active "$SERVICE_BOT" 2>/dev/null || echo "inactive")
 echo "    Статус: $BOT_STATUS"
