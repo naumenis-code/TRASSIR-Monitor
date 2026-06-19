@@ -188,6 +188,11 @@ mkdir -p $INSTALL_DIR/data
 mkdir -p $INSTALL_DIR/logs
 echo "    ✓ Каталоги созданы"
 
+# Права на data/ сразу — 775 чтобы www-data мог создавать WAL/SHM файлы SQLite
+chown -R www-data:www-data $INSTALL_DIR/data
+chmod 775 $INSTALL_DIR/data
+echo "    ✓ Права на data/ установлены (775, www-data)"
+
 # Создаём виртуальное окружение
 echo ""
 echo "  • Создание виртуального окружения Python..."
@@ -3975,7 +3980,8 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=$INSTALL_DIR
-Environment="PATH=$INSTALL_DIR/venv/bin"
+Environment="PATH=$INSTALL_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStartPre=+/bin/bash -c 'chown -R www-data:www-data $INSTALL_DIR/data && chmod 775 $INSTALL_DIR/data'
 ExecStart=$INSTALL_DIR/venv/bin/gunicorn --config $INSTALL_DIR/gunicorn_config.py app.app:app
 Restart=always
 RestartSec=5
@@ -4153,6 +4159,27 @@ UNEOF
 
 chmod +x /usr/local/bin/trassir-monitor-uninstall
 echo "    ✓ Деинсталлятор создан: /usr/local/bin/trassir-monitor-uninstall"
+# Настройка ротации логов
+echo ""
+echo "  • Настройка ротации логов (logrotate)..."
+cat > /etc/logrotate.d/trassir-monitor << 'LOGROTEOF'
+/opt/trassir-monitor/logs/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0664 www-data www-data
+    postrotate
+        systemctl reload trassir-monitor 2>/dev/null || true
+        systemctl reload trassir-tgbot 2>/dev/null || true
+        systemctl reload trassir-mailbot 2>/dev/null || true
+    endscript
+}
+LOGROTEOF
+echo "    ✓ Logrotate настроен (ежедневно, 7 дней, сжатие)"
+
 
 # Настройка прав доступа
 echo ""
