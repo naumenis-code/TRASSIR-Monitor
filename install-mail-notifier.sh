@@ -299,7 +299,7 @@ conn.execute("""
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts DATETIME,
         alert_key TEXT,
-        email TEXT,
+        recipient TEXT,
         subject TEXT
     )
 """)
@@ -392,6 +392,7 @@ import sqlite3
 import smtplib
 import ssl
 import traceback
+import html as html_escape_mod
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -497,20 +498,31 @@ def get_enabled_recipients():
         if conn:
             conn.close()
 
-def get_new_alerts():
+def get_new_alerts(recipient_email):
     """
-    Получает список новых алертов (ещё не отправленных по email).
-    Включает восстановления каналов и серверов.
-    
+    Получает список новых алертов, ещё не отправленных ИМЕННО этому
+    получателю (email).
+
+    Раньше дедупликация была глобальной ("отправлен ли алерт хоть
+    кому-то из получателей"), хотя отправка идёт по получателям
+    независимо — при всплеске (несколько серверов упали одновременно)
+    временная ошибка SMTP для одного адреса, пока остальные получали
+    письмо успешно, навсегда прятала от него это уведомление: сам
+    алерт исчезал из выборки для всех после первой успешной отправки
+    кому угодно, retry не было. Тот же баг, что и в tg_bot.py — там
+    воспроизведён тестом на эмуляции падения 5 серверов одновременно.
+    Теперь обе проверки ниже фильтруют по конкретному recipient.
+
     ВАЖНО: В SQL-запросах русский текст закодирован через
     символы подстановки Python, а не напрямую в SQL.
     """
     conn = get_db()
     try:
-        # Обычные алерты (warning, critical, ещё не отправлялись)
+        recipient_email = str(recipient_email)
+        # Обычные алерты (warning, critical), этому адресу ещё не отправлялись
         alerts_rows = conn.execute(
             """SELECT
-                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
+                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack, a.resolved_at,
                    s.name as server_name, s.ip as server_ip
                FROM alerts a
                JOIN servers s ON a.server_id = s.id
@@ -518,16 +530,17 @@ def get_new_alerts():
                  AND a.level IN ('warning', 'critical')
                  AND NOT EXISTS (
                      SELECT 1 FROM mail_logs ml
-                     WHERE ml.alert_key = CAST(a.id AS TEXT)
+                     WHERE ml.alert_key = CAST(a.id AS TEXT) AND ml.recipient = ?
                  )
-               ORDER BY a.ts ASC"""
+               ORDER BY a.ts ASC""",
+            (recipient_email,)
         ).fetchall()
 
-        # Восстановления: алерты закрылись (ack=1),
-        # мы их отправляли, но ещё не отправляли уведомление о восстановлении
+        # Восстановления: алерты закрылись (ack=1), этому адресу исходную
+        # проблему уже отправляли, а уведомление о восстановлении — ещё нет
         recovery_rows = conn.execute(
             """SELECT
-                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
+                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack, a.resolved_at,
                    s.name as server_name, s.ip as server_ip
                FROM alerts a
                JOIN servers s ON a.server_id = s.id
@@ -535,13 +548,14 @@ def get_new_alerts():
                  AND a.level IN ('warning', 'critical')
                  AND EXISTS (
                      SELECT 1 FROM mail_logs ml
-                     WHERE ml.alert_key = CAST(a.id AS TEXT)
+                     WHERE ml.alert_key = CAST(a.id AS TEXT) AND ml.recipient = ?
                  )
                  AND NOT EXISTS (
                      SELECT 1 FROM mail_logs ml
-                     WHERE ml.alert_key = 'recovery_' || CAST(a.id AS TEXT)
+                     WHERE ml.alert_key = 'recovery_' || CAST(a.id AS TEXT) AND ml.recipient = ?
                  )
-               ORDER BY a.ts ASC"""
+               ORDER BY a.ts ASC""",
+            (recipient_email, recipient_email)
         ).fetchall()
 
         result = []
@@ -582,6 +596,8 @@ def get_new_alerts():
             if 'Камера офлайн:' in orig:
                 cam_name = orig.replace('Камера офлайн: ', '').strip()
                 d['recovery_msg'] = f"Камера восстановлена: {cam_name}"
+            elif 'Сервер недоступен' in orig:
+                d['recovery_msg'] = "Сервер восстановлен"
             elif 'CPU' in orig:
                 d['recovery_msg'] = f"CPU в норме (было: {orig})"
             elif 'Архив' in orig:
@@ -613,91 +629,53 @@ def is_recovery_message(msg):
 def calc_downtime_for_alert(conn, alert):
     """
     Вычисляет время простоя для алерта о восстановлении.
-    Логика идентична telegram-боту v6.1.
-    """
-    msg = alert['msg']
-    server_id = alert['server_id']
-    recovery_ts_str = alert['ts']
 
+    Раньше здесь искали "похожий" более ранний алерт по тексту — это
+    было ошибкой: alert['ts'] это время СОЗДАНИЯ алерта (начало
+    проблемы), а не момент восстановления, который нигде не хранился.
+    На практике это почти всегда возвращало '' или считало интервал
+    между двумя несвязанными инцидентами.
+
+    Теперь app.py при каждом закрытии алерта (автоматическом или
+    вручную) пишет resolved_at в ту же строку — простой = разница
+    между resolved_at и ts ОДНОЙ И ТОЙ ЖЕ строки, без поиска.
+    """
+    resolved_at = alert.get('resolved_at')
+    if not resolved_at:
+        return ''
     try:
-        recovery_dt = datetime.strptime(recovery_ts_str, '%Y-%m-%d %H:%M:%S')
+        start_dt = datetime.strptime(alert['ts'], '%Y-%m-%d %H:%M:%S')
+        end_dt = datetime.strptime(resolved_at, '%Y-%m-%d %H:%M:%S')
+        delta = int((end_dt - start_dt).total_seconds())
+        if delta < 0:
+            return ''
+        return format_downtime(delta)
     except Exception:
         return ''
 
-    # Попытка 1: восстановление канала (камеры)
-    channel_match = re.search(r'#\d+\s+[^\,\]\n]+', msg)
-    if channel_match:
-        channel_name = channel_match.group(0).strip()
-        try:
-            offline_row = conn.execute(
-                """SELECT ts FROM alerts
-                   WHERE server_id = ?
-                     AND (msg LIKE ? OR msg LIKE ?)
-                     AND ts < ?
-                   ORDER BY ts DESC LIMIT 1""",
-                (server_id, f'%{channel_name}%',
-                 f'\u041a\u0430\u043c\u0435\u0440 \u043e\u0444\u043b\u0430\u0439\u043d%',
-                 recovery_ts_str)
-            ).fetchone()
-            if offline_row:
-                offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
-                delta = int((recovery_dt - offline_dt).total_seconds())
-                return format_downtime(delta)
-        except Exception:
-            pass
-
-    # Попытка 2: восстановление сервера
-    msg_lower = msg.lower()
-    if STR_SERVER1 in msg_lower or STR_SERVER2 in msg_lower:
-        try:
-            offline_row = conn.execute(
-                """SELECT ts FROM alerts
-                   WHERE server_id = ?
-                     AND (msg LIKE ? OR msg LIKE ? OR msg LIKE ?
-                          OR msg LIKE ? OR level = 'critical')
-                     AND ts < ?
-                   ORDER BY ts DESC LIMIT 1""",
-                (server_id,
-                 f'%\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f%',  # недоступ
-                 '%offline%',
-                 f'%\u043d\u0435 \u043e\u0442\u0432\u0435\u0447\u0430\u0435\u0442%',  # не отвечает
-                 f'%\u043f\u043e\u0442\u0435\u0440\u044f \u0441\u0432\u044f\u0437\u0438%',  # потеря связи
-                 recovery_ts_str)
-            ).fetchone()
-            if offline_row:
-                offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
-                delta = int((recovery_dt - offline_dt).total_seconds())
-                return format_downtime(delta)
-        except Exception:
-            pass
-
-    # Попытка 3: по таблице health
-    try:
-        offline_health = conn.execute(
-            """SELECT ts FROM health
-               WHERE server_id = ?
-                 AND (rt IS NULL OR rt > 9000)
-                 AND ts < ?
-               ORDER BY ts DESC LIMIT 1""",
-            (server_id, recovery_ts_str)
-        ).fetchone()
-        if offline_health:
-            offline_dt = datetime.strptime(offline_health['ts'], '%Y-%m-%d %H:%M:%S')
-            delta = int((recovery_dt - offline_dt).total_seconds())
-            if delta > 0:
-                return format_downtime(delta)
-    except Exception:
-        pass
-
-    return ''
-
 
 def mark_alert_as_sent(alert_id, email, subject):
-    """Помечает алерт как отправленный"""
+    """
+    Помечает алерт как отправленный.
+
+    Живой баг, найденный при нагрузочном тестировании (2026-09-06):
+    эта функция ВСЕГДА писала в несуществующую колонку `email` —
+    реальная схема таблицы mail_logs (создаётся init_db() в app.py,
+    который ставится ДО этого нотифайера) называет её `recipient`.
+    INSERT падал на КАЖДОМ вызове, исключение проглатывалось (см.
+    except ниже) — таблица mail_logs не получила ни одной строки за
+    всё время существования проекта. Следствие: get_new_alerts()
+    никогда не видела ни одной "уже отправленной" записи, поэтому
+    КАЖДЫЙ открытый алерт уходил повторно на КАЖДОМ цикле проверки
+    (CHECK_INTERVAL) всем получателям — не единожды, а бесконечным
+    потоком дублей, пока алерт не закроется. А уведомления о
+    восстановлении не отправлялись вообще никогда (для recovery_rows
+    нужна хоть одна существующая запись — их не было).
+    """
     conn = get_db()
     try:
         conn.execute(
-            """INSERT OR IGNORE INTO mail_logs (ts, alert_key, email, subject)
+            """INSERT OR IGNORE INTO mail_logs (ts, alert_key, recipient, subject)
                VALUES (datetime('now'), ?, ?, ?)""",
             (str(alert_id), str(email), str(subject))
         )
@@ -708,22 +686,13 @@ def mark_alert_as_sent(alert_id, email, subject):
         conn.close()
 
 
-def cleanup_old_logs():
-    """Удаляет старые записи из mail_logs (старше 7 дней)"""
-    conn = None
-    try:
-        conn = get_db()
-        deleted = conn.execute(
-            "DELETE FROM mail_logs WHERE ts < datetime('now', '-7 days')"
-        ).rowcount
-        conn.commit()
-        if deleted > 0:
-            print(f"[{datetime.now()}] \U0001f9f9 \u041e\u0447\u0438\u0449\u0435\u043d\u043e \u0441\u0442\u0430\u0440\u044b\u0445 \u0437\u0430\u043f\u0438\u0441\u0435\u0439: {deleted}")
-    except Exception as e:
-        print(f"[{datetime.now()}] WARN \u043e\u0447\u0438\u0441\u0442\u043a\u0430: {e}")
-    finally:
-        if conn:
-            conn.close()
+# Очистка mail_logs теперь централизована в app.py::cleanup_old_data()
+# (запускается там же, где чистятся health/alerts, раз в час) — привязана
+# к жизни самого алерта, а не к отдельному фиксированному таймеру. Раньше
+# здесь была своя очистка по 7 дням НЕЗАВИСИМО от retention_days и от
+# того, закрыт ли алерт — если проблема оставалась открытой дольше 7
+# дней, запись об уже отправленном письме удалялась раньше самого
+# алерта, и на следующем опросе бот считал его "новым" и слал повторно.
 
 
 # ============================================
@@ -875,6 +844,19 @@ def format_alert_email(alert_data, settings):
     monitor_url = settings.get('monitor_url', '')
     downtime = alert_data.get('downtime', '')
 
+    # Название/IP сервера и текст события заполняются человеком (форма
+    # добавления сервера) или самим устройством TRASSIR (имя канала) --
+    # без экранирования это HTML-инъекция в письмо, которое реально
+    # рендерится почтовым клиентом получателя. subject_safe_name -- отдельно,
+    # только без переноса строк (защита от header injection в Subject),
+    # HTML-экранирование там не нужно и испортило бы читаемость темы письма.
+    subject_safe_name = str(server_name).replace('\r', ' ').replace('\n', ' ')
+    server_name = html_escape_mod.escape(str(server_name))
+    server_ip = html_escape_mod.escape(str(server_ip))
+    message = html_escape_mod.escape(str(message))
+    if monitor_url:
+        monitor_url = html_escape_mod.escape(monitor_url)
+
     cpu_val = health.get('cpu', '?')
     cpu_str = f"{cpu_val:.1f}%" if isinstance(cpu_val, (int, float)) else f"{cpu_val}%"
     arch_val = health.get('arch', '?')
@@ -910,7 +892,7 @@ def format_alert_email(alert_data, settings):
                 </td>
               </tr>"""
 
-    subject = f"{style['subject_prefix']} \u2014 {server_name}"
+    subject = f"{style['subject_prefix']} \u2014 {subject_safe_name}"
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -1072,6 +1054,7 @@ def format_alert_email(alert_data, settings):
 def format_test_email(settings):
     """Формирует тестовое HTML-письмо"""
     monitor_url = settings.get('monitor_url', '\u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d')
+    monitor_url = html_escape_mod.escape(monitor_url) if monitor_url else monitor_url
     ts = datetime.now().strftime("%d.%m.%Y %H:%M:%S МСК")
 
     subject = f"{EMOJI_OK} TRASSIR Monitor \u2014 Email \u0443\u0432\u0435\u0434\u043e\u043c\u043b\u0435\u043d\u0438\u044f \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u044b"
@@ -1189,8 +1172,6 @@ def run_bot():
     else:
         print(f"[{datetime.now()}] WARN SMTP \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d")
 
-    cleanup_old_logs()
-
     total_sent = 0
     checks = 0
 
@@ -1219,15 +1200,17 @@ def run_bot():
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            alerts = get_new_alerts()
+            # Цикл идёт "по получателям снаружи" — каждый адрес получает и
+            # ретраит СВОЙ собственный список неотправленных алертов
+            # независимо от остальных (см. get_new_alerts() docstring —
+            # раньше общая на всех выборка означала, что временный сбой
+            # SMTP у одного адреса навсегда прятал от него алерт, даже
+            # успешно доставленный остальным).
+            for rcpt in recipients:
+                email = rcpt['email']
+                alerts = get_new_alerts(email)
 
-            for alert in alerts:
-                subject, html_body = format_alert_email(alert, settings)
-                sent_to = []
-
-                for rcpt in recipients:
-                    email = rcpt['email']
-
+                for alert in alerts:
                     if not alert.get('is_recovery'):
                         if alert['level'] == 'critical' and not rcpt.get('critical', True):
                             continue
@@ -1236,20 +1219,14 @@ def run_bot():
                         if alert['level'] == 'info' and not rcpt.get('info', False):
                             continue
 
+                    subject, html_body = format_alert_email(alert, settings)
                     if send_email(email, rcpt.get('name', ''), subject, html_body, settings):
                         key = f"recovery_{alert['id']}" if alert.get('is_recovery') else alert['id']
                         mark_alert_as_sent(key, email, subject)
-                        sent_to.append(email)
                         total_sent += 1
+                        downtime_info = f" | \u043f\u0440\u043e\u0441\u0442\u043e\u0439: {alert['downtime']}" if alert.get('downtime') else ""
+                        print(f"[{datetime.now()}] OK \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e: {alert['msg'][:60]}{downtime_info} -> {email}")
                         time.sleep(0.2)
-
-                if sent_to:
-                    downtime_info = f" | \u043f\u0440\u043e\u0441\u0442\u043e\u0439: {alert['downtime']}" if alert.get('downtime') else ""
-                    print(f"[{datetime.now()}] OK \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e: {alert['msg'][:60]}{downtime_info}")
-                    print(f"[{datetime.now()}]    \u041f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u0438: {', '.join(sent_to)}")
-
-            if checks % 360 == 0:
-                cleanup_old_logs()
 
         except KeyboardInterrupt:
             print(f"\n[{datetime.now()}] \U0001f6d1 Mail Bot \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d. \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e: {total_sent}")
@@ -1449,6 +1426,47 @@ case "${TEST_RESULT%%:*}" in
         echo "    • Логи ошибок: tail -20 $LOG_DIR/mailbot-error.log"
         ;;
 esac
+
+# ============================================
+# ФИКСАЦИЯ УСТАНОВЛЕННОГО КОММИТА (для дашборда/settings и проверки обновлений)
+# ============================================
+# Тот же приём, что и в install-trassir-monitor.sh — этот проект не
+# использует git clone ни для чего на сервере, поэтому единственный
+# способ узнать, какой коммит main реально был применён — спросить у
+# GitHub прямо сейчас и сохранить рядом с БД (data/ общий с дашбордом,
+# переживает переустановки Email-бота отдельно от дашборда).
+echo ""
+echo "  • Определение установленной версии (коммит main на GitHub)..."
+# -w дописывает реальный HTTP-код в конец вывода — без этого сбой (сеть,
+# лимит запросов GitHub API — 60/час без токена на IP) выглядел ровно
+# одинаково что при 200, что при 403, что при полном отсутствии ответа.
+GITHUB_API_RAW=$(curl -sS --connect-timeout 10 --max-time 15 --retry 2 --retry-delay 3 \
+    -H "Accept: application/vnd.github+json" \
+    -w '\nHTTPSTATUS:%{http_code}' \
+    "https://api.github.com/repos/naumenis-code/TRASSIR-Monitor/commits/main" 2>/dev/null)
+GITHUB_HTTP_CODE=$(echo "$GITHUB_API_RAW" | tail -1 | sed 's/HTTPSTATUS://')
+GITHUB_BODY=$(echo "$GITHUB_API_RAW" | sed '$d')
+
+LATEST_COMMIT=""
+if [ "$GITHUB_HTTP_CODE" = "200" ]; then
+    LATEST_COMMIT=$(echo "$GITHUB_BODY" | "$VENV_PYTHON" -c "
+import json, sys
+try:
+    print(json.load(sys.stdin)['sha'][:7])
+except Exception:
+    pass
+" 2>/dev/null)
+fi
+
+if [ -n "$LATEST_COMMIT" ]; then
+    echo "$LATEST_COMMIT" > "$INSTALL_DIR/data/.installed_commit_mail"
+    echo "    ✓ Версия зафиксирована: $LATEST_COMMIT"
+else
+    echo -e "    ${YELLOW}⚠ Не удалось определить версию через GitHub API (HTTP ${GITHUB_HTTP_CODE:-нет ответа}) — версия будет показываться как '?'${NC}"
+    if [ "$GITHUB_HTTP_CODE" = "403" ]; then
+        echo -e "    ${YELLOW}Похоже на лимит запросов к GitHub API (60/час без токена на один IP) — попробуйте обновить позже.${NC}"
+    fi
+fi
 
 # ============================================
 # ФИНАЛЬНЫЙ ВЫВОД

@@ -420,6 +420,7 @@ import sqlite3
 import requests
 import configparser
 import traceback
+import html
 from datetime import datetime, timedelta
 
 # ============================================
@@ -435,29 +436,93 @@ CHECK_INTERVAL = 10  # заменяется sed при установке
 # РАБОТА С КОНФИГУРАЦИОННЫМ ФАЙЛОМ
 # ============================================
 
+def get_db_transport_overrides():
+    """
+    Читает переопределения способа отправки (proxy_url/api_base/api_key)
+    из таблицы telegram_settings — их можно менять в настройках дашборда
+    без переустановки бота и без перезапуска службы (читаются заново на
+    каждую отправку). Пустая строка/отсутствие строки = не переопределять,
+    оставить то что в config.ini (proxy) или пусто (api_base/api_key).
+    """
+    overrides = {}
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        rows = conn.execute(
+            "SELECT key, value FROM telegram_settings WHERE key IN ('proxy_url','api_base','api_key')"
+        ).fetchall()
+        conn.close()
+        for k, v in rows:
+            if v:
+                overrides[k] = v
+    except Exception:
+        # БД может быть недоступна (первый запуск, миграция и т.п.) —
+        # тихо работаем с тем, что есть в config.ini.
+        pass
+    return overrides
+
+
 def get_config():
-    """Читает конфигурацию из config.ini."""
+    """Читает конфигурацию из config.ini + переопределения способа отправки из БД."""
     try:
         cfg = configparser.ConfigParser()
         cfg.read(CONFIG_FILE)
         if 'telegram' not in cfg:
             return None
-        return {
+        result = {
             'token': cfg['telegram'].get('token', ''),
             'proxy': cfg['telegram'].get('proxy', ''),
-            'monitor_url': cfg['telegram'].get('monitor_url', '')
+            'monitor_url': cfg['telegram'].get('monitor_url', ''),
+            'api_base': '',
+            'api_key': '',
         }
+        overrides = get_db_transport_overrides()
+        if overrides.get('proxy_url'):
+            result['proxy'] = overrides['proxy_url']
+        if overrides.get('api_base'):
+            result['api_base'] = overrides['api_base']
+        if overrides.get('api_key'):
+            result['api_key'] = overrides['api_key']
+        return result
     except Exception as e:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO чтение конфигурации: {e}")
         return None
 
 
 def get_proxies():
-    """Формирует словарь прокси для requests."""
+    """
+    Формирует словарь прокси для requests. Поддерживает http(s):// и,
+    если в venv установлен PySocks, socks5://.../socks5h://... — requests
+    сам разбирает схему по URL, отдельный код для SOCKS5 не нужен.
+    """
     cfg = get_config()
     if not cfg or not cfg['proxy']:
         return {}
     return {'http': cfg['proxy'], 'https': cfg['proxy']}
+
+
+def _telegram_api_url(cfg, method):
+    """
+    Строит URL запроса к Telegram Bot API.
+
+    По умолчанию — обычный https://api.telegram.org/bot<token>/<method>.
+    Если в настройках указан свой api_base (собственный Cloudflare
+    Worker/relay, поднятый и доверенный ПОЛЬЗОВАТЕЛЕМ САМОСТОЯТЕЛЬНО —
+    ни один конкретный чужой домен здесь никогда не зашивается по
+    умолчанию, см. CLAUDE.md "Telegram: способы отправки"), запрос
+    уходит на <api_base>/bot<token>/<method>, и если задан api_key —
+    добавляется ?auth=<api_key> query-параметром (типовой способ,
+    которым такие relay проверяют доступ).
+    """
+    token = cfg['token']
+    api_base = (cfg.get('api_base') or '').strip().rstrip('/')
+    if not api_base:
+        return f"https://api.telegram.org/bot{token}/{method}"
+    url = f"{api_base}/bot{token}/{method}"
+    api_key = (cfg.get('api_key') or '').strip()
+    if api_key:
+        from urllib.parse import quote
+        url += f"?auth={quote(api_key, safe='')}"
+    return url
 
 
 # ============================================
@@ -478,7 +543,7 @@ def send_telegram_message(chat_id, text):
         return False
 
     try:
-        url = f"https://api.telegram.org/bot{cfg['token']}/sendMessage"
+        url = _telegram_api_url(cfg, "sendMessage")
         payload = {
             'chat_id': chat_id,
             'text': text,
@@ -640,10 +705,23 @@ def format_alert_message(alert_data):
     if is_recovery and alert_data.get('recovery_msg'):
         message = alert_data['recovery_msg']
 
+    # classify_alert смотрит на текст ДО экранирования — она ищет
+    # ключевые русские слова, а не HTML-разметку, порядок не важен.
     kind, header, _ = classify_alert(level, message)
     if is_recovery:
         kind, header = 'OK', 'ВОССТАНОВЛЕНИЕ'
     emoji = EMOJI_REAL.get(kind, '\u2757')
+
+    # Telegram \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u0441 parse_mode=HTML \u2014 \u043b\u044e\u0431\u043e\u0439 '<'/'>'/'&' \u0432 \u0438\u043c\u0435\u043d\u0438
+    # \u0441\u0435\u0440\u0432\u0435\u0440\u0430, \u043a\u0430\u043c\u0435\u0440\u044b \u0438\u043b\u0438 \u0432 \u0442\u0435\u043a\u0441\u0442\u0435 \u0441\u043e\u0431\u044b\u0442\u0438\u044f (\u0432\u0441\u0451 \u044d\u0442\u043e \u0437\u0430\u043f\u043e\u043b\u043d\u044f\u0435\u0442 \u0447\u0435\u043b\u043e\u0432\u0435\u043a \u0438\u043b\u0438
+    # \u0441\u0430\u043c\u043e \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u043e TRASSIR, \u043d\u0435 \u043c\u044b) \u0434\u0435\u043b\u0430\u0435\u0442 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0443 \u043d\u0435\u0432\u0430\u043b\u0438\u0434\u043d\u043e\u0439. \u0411\u0435\u0437
+    # \u044d\u043a\u0440\u0430\u043d\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f Telegram \u043e\u0442\u0432\u0435\u0447\u0430\u0435\u0442 400 "can't parse entities" \u0438
+    # send_telegram_message() \u0442\u0438\u0445\u043e \u0432\u043e\u0437\u0432\u0440\u0430\u0449\u0430\u0435\u0442 False \u2014 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 \u043d\u0435 \u043f\u0440\u043e\u0441\u0442\u043e
+    # \u0432\u044b\u0433\u043b\u044f\u0434\u0438\u0442 \u043d\u0435\u043a\u0440\u0430\u0441\u0438\u0432\u043e, \u043e\u043d\u043e \u0432\u043e\u043e\u0431\u0449\u0435 \u043d\u0435 \u0443\u0445\u043e\u0434\u0438\u0442, silently, \u0434\u043b\u044f \u043b\u044e\u0431\u043e\u0433\u043e
+    # \u0441\u0435\u0440\u0432\u0435\u0440\u0430/\u043a\u0430\u043c\u0435\u0440\u044b \u0441 \u0442\u0430\u043a\u0438\u043c \u0438\u043c\u0435\u043d\u0435\u043c.
+    server_name = html.escape(str(server_name))
+    server_ip = html.escape(str(server_ip))
+    message = html.escape(str(message))
 
     cfg = get_config()
     monitor_url = cfg.get('monitor_url', '') if cfg else ''
@@ -679,7 +757,7 @@ def format_alert_message(alert_data):
     ]
 
     if monitor_url and server_id:
-        lines.append(f"\n{ICON_LINK} <a href='{monitor_url}/server/{server_id}'>Открыть в TRASSIR Monitor</a>")
+        lines.append(f"\n{ICON_LINK} <a href='{html.escape(monitor_url)}/server/{server_id}'>Открыть в TRASSIR Monitor</a>")
 
     return "\n".join(lines)
 
@@ -687,6 +765,7 @@ def format_alert_message(alert_data):
 def format_test_message(monitor_url=""):
     """Форматирует тестовое сообщение."""
     ts = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    monitor_url = html.escape(monitor_url) if monitor_url else ""
     return (
         f"\u2705 <b>TRASSIR Monitor \u2014 Бот установлен!</b>\n\n"
         f"\U0001f5a5 <b>Система мониторинга активна</b>\n"
@@ -714,96 +793,29 @@ def calc_downtime_for_alert(conn, alert):
     """
     Вычисляет время простоя для алерта о восстановлении.
 
-    Алгоритм:
-      1. Если в сообщении есть имя канала (#N Имя) — ищем последний
-         алерт об отвале ИМЕННО этого канала до момента восстановления.
-      2. Если восстановление сервера — ищем алерт "сервер недоступен"
-         или событие offline для этого server_id.
-      3. Возвращает отформатированную строку или '' если не найдено.
-    """
-    msg = alert['msg']
-    server_id = alert['server_id']
-    recovery_ts_str = alert['ts']
+    Раньше здесь был поиск "похожего" более раннего алерта по тексту —
+    ошибочный подход: alert['ts'] это время СОЗДАНИЯ алерта (начало
+    проблемы), а не момент восстановления, и в БД никогда не хранилось,
+    когда именно проблема закрылась (ack=1). На практике это почти
+    всегда возвращало '' или считало интервал между двумя НЕСВЯЗАННЫМИ
+    инцидентами.
 
+    Теперь app.py при каждом закрытии алерта (автоматическом или
+    вручную) пишет resolved_at в ту же строку — простой = разница
+    между resolved_at и ts ОДНОЙ И ТОЙ ЖЕ строки, без поиска.
+    """
+    resolved_at = alert.get('resolved_at')
+    if not resolved_at:
+        return ''
     try:
-        recovery_dt = datetime.strptime(recovery_ts_str, '%Y-%m-%d %H:%M:%S')
+        start_dt = datetime.strptime(alert['ts'], '%Y-%m-%d %H:%M:%S')
+        end_dt = datetime.strptime(resolved_at, '%Y-%m-%d %H:%M:%S')
+        delta = int((end_dt - start_dt).total_seconds())
+        if delta < 0:
+            return ''
+        return format_downtime(delta)
     except Exception:
         return ''
-
-    # --- Попытка 1: восстановление канала (камеры) ---
-    channel_match = re.search(r'#\d+\s+[^\,\]\n]+', msg)
-    if channel_match:
-        channel_name = channel_match.group(0).strip()
-        try:
-            offline_row = conn.execute(
-                """SELECT ts FROM alerts
-                   WHERE server_id = ?
-                     AND msg LIKE 'Камера офлайн:%' || ?
-                     AND ts < ?
-                   ORDER BY ts DESC LIMIT 1""",
-                (server_id, channel_name, recovery_ts_str)
-            ).fetchone()
-            if offline_row:
-                offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
-                delta = int((recovery_dt - offline_dt).total_seconds())
-                return format_downtime(delta)
-        except Exception:
-            pass
-
-    # --- Попытка 2: восстановление сервера ---
-    msg_lower = msg.lower()
-    if 'сервер' in msg_lower or 'server' in msg_lower:
-        try:
-            offline_row = conn.execute(
-                """SELECT ts FROM alerts
-                   WHERE server_id = ?
-                     AND (
-                           msg LIKE '%недоступ%'
-                        OR msg LIKE '%offline%'
-                        OR msg LIKE '%не отвечает%'
-                        OR msg LIKE '%потеря связи%'
-                        OR level = 'critical'
-                     )
-                     AND ts < ?
-                   ORDER BY ts DESC LIMIT 1""",
-                (server_id, recovery_ts_str)
-            ).fetchone()
-            if offline_row:
-                offline_dt = datetime.strptime(offline_row['ts'], '%Y-%m-%d %H:%M:%S')
-                delta = int((recovery_dt - offline_dt).total_seconds())
-                return format_downtime(delta)
-        except Exception:
-            pass
-
-    # --- Попытка 3: по таблице health — последний момент когда сервер пропадал ---
-    try:
-        # Ищем момент до recovery когда rt был NULL или очень большой (сервер был недоступен)
-        offline_health = conn.execute(
-            """SELECT ts FROM health
-               WHERE server_id = ?
-                 AND (rt IS NULL OR rt > 9000)
-                 AND ts < ?
-               ORDER BY ts DESC LIMIT 1""",
-            (server_id, recovery_ts_str)
-        ).fetchone()
-        if offline_health:
-            offline_dt = datetime.strptime(offline_health['ts'], '%Y-%m-%d %H:%M:%S')
-            delta = int((recovery_dt - offline_dt).total_seconds())
-            if delta > 0:
-                return format_downtime(delta)
-    except Exception:
-        pass
-
-    return ''
-
-
-def already_sent(conn, alert_id):
-    """Проверяет был ли алерт уже отправлен хоть одному получателю."""
-    row = conn.execute(
-        "SELECT id FROM telegram_logs WHERE alert_key = ? LIMIT 1",
-        (str(alert_id),)
-    ).fetchone()
-    return row is not None
 
 
 def get_health_for_server(conn, server_id):
@@ -820,20 +832,36 @@ def get_health_for_server(conn, server_id):
     return {'cpu': '?', 'ch_online': '?', 'ch_total': '?', 'arch': '?', 'uptime': 0, 'rt': '?'}
 
 
-def get_new_alerts():
+def get_new_alerts(chat_id):
     """
-    Получает список новых алертов (ещё не отправленных).
+    Получает список новых алертов, ещё не отправленных ИМЕННО этому chat_id.
+
+    Раньше дедупликация проверялась глобально ("отправлен ли алерт хоть
+    кому-то"), хотя отправка идёт по получателям независимо — если при
+    всплеске (несколько серверов упали одновременно) отправка одному из
+    N чатов временно не удавалась (сетевая ошибка, лимит Telegram 429),
+    а остальным чатам в ту же секунду удавалась, алерт помечался
+    отправленным навсегда и подводивший чат больше НИКОГДА не получал
+    это уведомление, даже после восстановления сети — retry не было в
+    принципе, поскольку сам алерт исчезал из выборки для всех. Живой
+    баг, подтверждён тестом с эмуляцией одновременного падения 5
+    серверов и одного "плохого" получателя. Теперь каждый чат
+    проверяется независимо — обе проверки ниже фильтруют по chat_id.
 
     Включает:
-      - Обычные алерты (ack=0, warning/critical)
-      - Восстановления каналов и серверов (level=info, msg содержит 'восстановлен')
+      - Обычные алерты (ack=0, warning/critical), которые этот чат
+        ещё не получал
+      - Восстановления — только для алертов, о проблеме которых этот
+        же чат уже был уведомлён (иначе получится "восстановлено" без
+        предшествующего "сломалось")
     """
     conn = get_database_connection()
     try:
-        # --- Обычные алерты (ack=0, ещё не отправлялись) ---
+        chat_id = str(chat_id)
+        # --- Обычные алерты (ack=0, этому чату ещё не отправлялись) ---
         alerts_rows = conn.execute(
             """SELECT
-                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
+                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack, a.resolved_at,
                    s.name as server_name, s.ip as server_ip
                FROM alerts a
                JOIN servers s ON a.server_id = s.id
@@ -841,17 +869,18 @@ def get_new_alerts():
                  AND a.level IN ('warning', 'critical')
                  AND NOT EXISTS (
                      SELECT 1 FROM telegram_logs tl
-                     WHERE tl.alert_key = CAST(a.id AS TEXT)
+                     WHERE tl.alert_key = CAST(a.id AS TEXT) AND tl.chat_id = ?
                  )
-               ORDER BY a.ts ASC"""
+               ORDER BY a.ts ASC""",
+            (chat_id,)
         ).fetchall()
 
-        # --- Восстановления: алерты которые закрылись (ack=1)
-        #     но в telegram_logs есть запись об отправке (значит мы их отправляли)
-        #     и нет записи о восстановлении (alert_key = 'recovery_' + id) ---
+        # --- Восстановления: алерты которые закрылись (ack=1),
+        #     этому чату исходную проблему уже отправляли, а
+        #     уведомление о восстановлении — ещё нет ---
         recovery_rows = conn.execute(
             """SELECT
-                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack,
+                   a.id, a.server_id, a.level, a.msg, a.ts, a.ack, a.resolved_at,
                    s.name as server_name, s.ip as server_ip
                FROM alerts a
                JOIN servers s ON a.server_id = s.id
@@ -859,13 +888,14 @@ def get_new_alerts():
                  AND a.level IN ('warning', 'critical')
                  AND EXISTS (
                      SELECT 1 FROM telegram_logs tl
-                     WHERE tl.alert_key = CAST(a.id AS TEXT)
+                     WHERE tl.alert_key = CAST(a.id AS TEXT) AND tl.chat_id = ?
                  )
                  AND NOT EXISTS (
                      SELECT 1 FROM telegram_logs tl
-                     WHERE tl.alert_key = 'recovery_' || CAST(a.id AS TEXT)
+                     WHERE tl.alert_key = 'recovery_' || CAST(a.id AS TEXT) AND tl.chat_id = ?
                  )
-               ORDER BY a.ts ASC"""
+               ORDER BY a.ts ASC""",
+            (chat_id, chat_id)
         ).fetchall()
 
         result = []
@@ -886,6 +916,8 @@ def get_new_alerts():
             if 'Камера офлайн:' in orig:
                 cam_name = orig.replace('Камера офлайн: ', '').strip()
                 d['recovery_msg'] = f"✅ Камера восстановлена: {cam_name}"
+            elif 'Сервер недоступен' in orig:
+                d['recovery_msg'] = "✅ Сервер восстановлен"
             elif 'CPU' in orig:
                 d['recovery_msg'] = f"✅ CPU в норме (было: {orig})"
             elif 'Архив' in orig:
@@ -949,20 +981,13 @@ def is_telegram_enabled():
         conn.close()
 
 
-def cleanup_old_logs():
-    """Удаляет старые записи из telegram_logs (старше 7 дней)."""
-    try:
-        conn = get_database_connection()
-        deleted = conn.execute(
-            "DELETE FROM telegram_logs WHERE ts < datetime('now', '+3 hours', '-7 days')"
-        ).rowcount
-        conn.commit()
-        if deleted > 0:
-            print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Очищено старых записей: {deleted}")
-    except Exception as e:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] WARN очистка: {e}")
-    finally:
-        conn.close()
+# Очистка telegram_logs теперь централизована в app.py::cleanup_old_data()
+# (запускается там же, где чистятся health/alerts, раз в час) — привязана
+# к жизни самого алерта, а не к отдельному фиксированному таймеру. Раньше
+# здесь была своя очистка по 7 дням НЕЗАВИСИМО от retention_days и от
+# того, закрыт ли алерт — если проблема оставалась открытой дольше 7
+# дней, запись об уже отправленном уведомлении удалялась раньше самого
+# алерта, и на следующем опросе бот считал его "новым" и слал повторно.
 
 
 # ============================================
@@ -987,8 +1012,6 @@ def run_bot():
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Прокси: настроен")
     else:
         print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Подключение: прямое")
-
-    cleanup_old_logs()
 
     total_sent = 0
     checks = 0
@@ -1017,14 +1040,18 @@ def run_bot():
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            alerts = get_new_alerts()
+            # Цикл идёт "по получателям снаружи" — каждый чат получает и
+            # ретраит СВОЙ собственный список неотправленных алертов
+            # независимо от остальных (см. get_new_alerts() docstring —
+            # раньше цикл шёл "по алертам снаружи" с общей на все чаты
+            # выборкой, из-за чего временный сбой у одного получателя
+            # навсегда прятал от него алерт, даже успешно отправленный
+            # остальным).
+            for chat in chats:
+                chat_id = chat['chat_id']
+                alerts = get_new_alerts(chat_id)
 
-            for alert in alerts:
-                text = format_alert_message(alert)
-                sent_to = []
-
-                for chat in chats:
-                    chat_id = chat['chat_id']
+                for alert in alerts:
                     lvl = alert['level']
 
                     # Фильтрация по типу алерта
@@ -1038,22 +1065,15 @@ def run_bot():
                     elif lvl == 'info' and not chat.get('info', False):
                         continue
 
+                    text = format_alert_message(alert)
                     if send_telegram_message(chat_id, text):
                         # Для восстановлений пишем отдельный ключ чтобы не путать с оригинальным алертом
                         key = f"recovery_{alert['id']}" if alert.get('is_recovery') else alert['id']
                         mark_alert_as_sent(key, chat_id)
-                        sent_to.append(str(chat_id))
                         total_sent += 1
+                        downtime_info = f" | простой: {alert['downtime']}" if alert.get('downtime') else ""
+                        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] OK {alert['msg'][:60]}{downtime_info} -> {chat_id}")
                         time.sleep(0.05)
-
-                if sent_to:
-                    downtime_info = f" | простой: {alert['downtime']}" if alert.get('downtime') else ""
-                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] OK {alert['msg'][:60]}{downtime_info}")
-                    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}]    -> {', '.join(sent_to)}")
-
-            # Очистка каждые 6 минут (360 итераций)
-            if checks % 360 == 0:
-                cleanup_old_logs()
 
         except KeyboardInterrupt:
             print(f"\n[{datetime.now():%Y-%m-%d %H:%M:%S}] Бот остановлен. Отправлено: {total_sent}")
@@ -1241,6 +1261,47 @@ case "$TEST_RESULT" in
         echo "    tail -f $LOG_DIR/tgbot.log"
         ;;
 esac
+
+# ============================================
+# ФИКСАЦИЯ УСТАНОВЛЕННОГО КОММИТА (для дашборда/settings и проверки обновлений)
+# ============================================
+# Тот же приём, что и в install-trassir-monitor.sh — этот проект не
+# использует git clone ни для чего на сервере, поэтому единственный
+# способ узнать, какой коммит main реально был применён — спросить у
+# GitHub прямо сейчас и сохранить рядом с БД (data/ общий с дашбордом,
+# переживает переустановки бота отдельно от дашборда).
+echo ""
+echo "  • Определение установленной версии (коммит main на GitHub)..."
+# -w дописывает реальный HTTP-код в конец вывода — без этого сбой (сеть,
+# лимит запросов GitHub API — 60/час без токена на IP) выглядел ровно
+# одинаково что при 200, что при 403, что при полном отсутствии ответа.
+GITHUB_API_RAW=$(curl -sS --connect-timeout 10 --max-time 15 --retry 2 --retry-delay 3 \
+    -H "Accept: application/vnd.github+json" \
+    -w '\nHTTPSTATUS:%{http_code}' \
+    "https://api.github.com/repos/naumenis-code/TRASSIR-Monitor/commits/main" 2>/dev/null)
+GITHUB_HTTP_CODE=$(echo "$GITHUB_API_RAW" | tail -1 | sed 's/HTTPSTATUS://')
+GITHUB_BODY=$(echo "$GITHUB_API_RAW" | sed '$d')
+
+LATEST_COMMIT=""
+if [ "$GITHUB_HTTP_CODE" = "200" ]; then
+    LATEST_COMMIT=$(echo "$GITHUB_BODY" | "$VENV_PYTHON" -c "
+import json, sys
+try:
+    print(json.load(sys.stdin)['sha'][:7])
+except Exception:
+    pass
+" 2>/dev/null)
+fi
+
+if [ -n "$LATEST_COMMIT" ]; then
+    echo "$LATEST_COMMIT" > "$INSTALL_DIR/data/.installed_commit_telegram"
+    echo "    ✓ Версия зафиксирована: $LATEST_COMMIT"
+else
+    echo -e "    ${YELLOW}⚠ Не удалось определить версию через GitHub API (HTTP ${GITHUB_HTTP_CODE:-нет ответа}) — версия будет показываться как '?'${NC}"
+    if [ "$GITHUB_HTTP_CODE" = "403" ]; then
+        echo -e "    ${YELLOW}Похоже на лимит запросов к GitHub API (60/час без токена на один IP) — попробуйте обновить позже.${NC}"
+    fi
+fi
 
 # ============================================
 # ФИНАЛЬНЫЙ ВЫВОД

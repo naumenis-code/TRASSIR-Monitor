@@ -41,6 +41,12 @@ HAS_TGPROXY=0
 systemctl list-unit-files 2>/dev/null | grep -q "trassir-tgbot" && HAS_TGBOT=1
 systemctl list-unit-files 2>/dev/null | grep -q "trassir-tgproxy" && HAS_TGPROXY=1
 
+# Юнит-файл на диске проверяем отдельно от systemctl list-unit-files —
+# после частично неудачного удаления/обновления один может пережить
+# другой (см. ту же правку в uninstall-trassir-monitor.sh, 2026-09-07).
+[ -f "/etc/systemd/system/trassir-tgbot.service" ] && HAS_TGBOT=1
+[ -f "/etc/systemd/system/trassir-tgproxy.service" ] && HAS_TGPROXY=1
+
 [ -f "$INSTALL_DIR/app/tg_bot.py" ] && HAS_TGBOT=1
 [ -f "$INSTALL_DIR/app/tg_proxy_bot.py" ] && HAS_TGPROXY=1
 [ -f "$INSTALL_DIR/config.ini" ] && HAS_TGBOT=1

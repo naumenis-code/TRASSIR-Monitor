@@ -39,6 +39,10 @@ fi
 HAS_MAIL=0
 
 systemctl list-unit-files 2>/dev/null | grep -q "trassir-mailbot" && HAS_MAIL=1
+# Юнит-файл на диске проверяем отдельно от systemctl list-unit-files —
+# после частично неудачного удаления/обновления один может пережить
+# другой (см. ту же правку в uninstall-trassir-monitor.sh, 2026-09-07).
+[ -f "/etc/systemd/system/trassir-mailbot.service" ] && HAS_MAIL=1
 [ -f "$INSTALL_DIR/app/mail_bot.py" ] && HAS_MAIL=1
 
 if [ $HAS_MAIL -eq 0 ]; then
