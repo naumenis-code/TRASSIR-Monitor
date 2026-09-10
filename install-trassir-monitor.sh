@@ -5068,7 +5068,7 @@ echo "  • Создание systemd сервиса..."
 cat > /etc/systemd/system/$SERVICE.service << SERVEOF
 [Unit]
 Description=TRASSIR Monitor v13.0
-Documentation=https://github.com/trassir-monitor
+Documentation=https://github.com/naumenis-code/TRASSIR-Monitor
 After=network-online.target
 Wants=network-online.target
 
