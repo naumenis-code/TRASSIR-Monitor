@@ -1293,14 +1293,25 @@ except Exception:
 " 2>/dev/null)
 fi
 
+COMMIT_ERROR_FILE="$INSTALL_DIR/data/.installed_commit_telegram.error"
 if [ -n "$LATEST_COMMIT" ]; then
     echo "$LATEST_COMMIT" > "$INSTALL_DIR/data/.installed_commit_telegram"
+    rm -f "$COMMIT_ERROR_FILE"
     echo "    ✓ Версия зафиксирована: $LATEST_COMMIT"
 else
     echo -e "    ${YELLOW}⚠ Не удалось определить версию через GitHub API (HTTP ${GITHUB_HTTP_CODE:-нет ответа}) — версия будет показываться как '?'${NC}"
     if [ "$GITHUB_HTTP_CODE" = "403" ]; then
+        COMMIT_ERROR_REASON="HTTP 403 — похоже на лимит запросов к GitHub API (60/час без токена на IP), попробуйте обновить позже"
         echo -e "    ${YELLOW}Похоже на лимит запросов к GitHub API (60/час без токена на один IP) — попробуйте обновить позже.${NC}"
+    elif [ "$GITHUB_HTTP_CODE" = "000" ] || [ -z "$GITHUB_HTTP_CODE" ]; then
+        COMMIT_ERROR_REASON="HTTP 000 — api.github.com не ответил (сеть/DNS, это отдельный сервис от raw.githubusercontent.com)"
+        echo -e "    ${YELLOW}api.github.com не ответил вовсе (не то же самое, что raw.githubusercontent.com,${NC}"
+        echo -e "    ${YELLOW}который только что успешно скачал этот же скрипт — разные сервисы GitHub).${NC}"
+    else
+        COMMIT_ERROR_REASON="HTTP ${GITHUB_HTTP_CODE:-?} — неожиданный ответ GitHub API"
     fi
+    echo -e "    ${YELLOW}(не мешает работе бота, только отображению версии/проверке обновлений)${NC}"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $COMMIT_ERROR_REASON" > "$COMMIT_ERROR_FILE"
 fi
 
 # ============================================
