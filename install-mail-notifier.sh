@@ -93,6 +93,73 @@ fi
 echo ""
 
 # ============================================
+# СВЕЖАЯ УСТАНОВКА ИЛИ ОБНОВЛЕНИЕ?
+# ============================================
+# Тот же принцип, что уже применён в install-telegram-notifier.sh
+# (см. её же комментарий там для полной истории) — раньше этот скрипт
+# БЕЗУСЛОВНО переспрашивал SMTP-сервер/порт/логин/пароль/получателей
+# при КАЖДОМ запуске, включая обычное "Update all" из лаунчера. Для
+# Email риск был даже менее заметным, чем для Telegram-прокси, но
+# ровно того же класса: SMTP-настройки живут в таблице mail_settings
+# через "INSERT OR IGNORE" — то есть повторный ввод при обновлении на
+# самом деле МОЛЧА ИГНОРИРОВАЛСЯ (если строка с этим ключом уже была),
+# так что человек, пытающийся СМЕНИТЬ пароль/сервер через
+# переустановку, видел "параметры сохранены" и даже не подозревал, что
+# ничего реально не изменилось. Signal "уже настроено" здесь — сами
+# значения в БД (mail_settings/mail_recipients), а не отдельный файл
+# или флаг, которые могли бы разойтись с реальностью.
+IS_UPDATE=0
+OLD_SMTP_SERVER=""
+OLD_SMTP_PORT=""
+OLD_SMTP_USER=""
+OLD_SMTP_PASS=""
+OLD_SMTP_PASS_SET=0
+OLD_MONITOR_URL=""
+OLD_INTERVAL=""
+EXISTING_RCPT_COUNT=0
+
+_read_mail_setting() {
+    "$VENV_PYTHON" -c "
+import sqlite3, sys
+try:
+    conn = sqlite3.connect('$INSTALL_DIR/data/trassir.db')
+    row = conn.execute('SELECT value FROM mail_settings WHERE key = ?', (sys.argv[1],)).fetchone()
+    print(row[0] if row else '')
+except Exception:
+    print('')
+" "$1" 2>/dev/null
+}
+
+if [ -f "$INSTALL_DIR/data/trassir.db" ]; then
+    OLD_SMTP_SERVER=$(_read_mail_setting smtp_server)
+    if [ -n "$OLD_SMTP_SERVER" ]; then
+        IS_UPDATE=1
+        OLD_SMTP_PORT=$(_read_mail_setting smtp_port)
+        OLD_SMTP_USER=$(_read_mail_setting smtp_user)
+        OLD_SMTP_PASS=$(_read_mail_setting smtp_pass)
+        [ -n "$OLD_SMTP_PASS" ] && OLD_SMTP_PASS_SET=1
+        OLD_MONITOR_URL=$(_read_mail_setting monitor_url)
+        EXISTING_RCPT_COUNT=$("$VENV_PYTHON" -c "
+import sqlite3
+try:
+    conn = sqlite3.connect('$INSTALL_DIR/data/trassir.db')
+    print(conn.execute('SELECT COUNT(*) FROM mail_recipients').fetchone()[0])
+except Exception:
+    print(0)
+" 2>/dev/null)
+        EXISTING_RCPT_COUNT=$(echo "$EXISTING_RCPT_COUNT" | grep -oE '^[0-9]+$')
+        EXISTING_RCPT_COUNT=${EXISTING_RCPT_COUNT:-0}
+    fi
+fi
+# CHECK_INTERVAL никогда не хранился в БД — он, как и у Telegram-бота,
+# вшит прямо в код mail_bot.py через sed (см. ШАГ 2 ниже), поэтому
+# "текущее" значение можно узнать только из уже лежащего на диске
+# файла, пока heredoc его не перезаписал.
+if [ "$IS_UPDATE" -eq 1 ] && [ -f "$MAILBOT_PY" ]; then
+    OLD_INTERVAL=$(grep -oP '^CHECK_INTERVAL = \K[0-9]+' "$MAILBOT_PY" 2>/dev/null | head -1)
+fi
+
+# ============================================
 # ЗАПРОС ПАРАМЕТРОВ У ПОЛЬЗОВАТЕЛЯ
 # ============================================
 
@@ -100,19 +167,28 @@ echo -e "${YELLOW}════════════════════�
 echo -e "${YELLOW}  НАЧАЛЬНАЯ НАСТРОЙКА EMAIL                   ${NC}"
 echo -e "${YELLOW}══════════════════════════════════════════════${NC}"
 echo ""
-echo -e "  Это начальные параметры SMTP-сервера."
-echo -e "  Все настройки можно изменить позже через веб-интерфейс /settings"
+if [ "$IS_UPDATE" -eq 1 ]; then
+    echo -e "  ${CYAN}Обнаружена существующая конфигурация в базе данных.${NC}"
+    echo -e "  ${CYAN}Режим ОБНОВЛЕНИЯ — Enter на любом вопросе ниже оставит текущее значение.${NC}"
+else
+    echo -e "  Это начальные параметры SMTP-сервера."
+    echo -e "  Все настройки можно изменить позже через веб-интерфейс /settings"
+fi
 echo ""
 
 echo -e "  ${BOLD}1. SMTP-сервер${NC}"
 echo -e "     Примеры: smtp.gmail.com, smtp.yandex.ru, mail.yourdomain.com"
 echo ""
-read -p "     SMTP сервер: " SMTP_SERVER
-
-while [ -z "$SMTP_SERVER" ]; do
-    echo -e "     ${RED}⚠ SMTP сервер обязателен!${NC}"
+if [ -n "$OLD_SMTP_SERVER" ]; then
+    read -p "     SMTP сервер (Enter — оставить текущий: $OLD_SMTP_SERVER): " SMTP_SERVER
+    SMTP_SERVER=${SMTP_SERVER:-$OLD_SMTP_SERVER}
+else
     read -p "     SMTP сервер: " SMTP_SERVER
-done
+    while [ -z "$SMTP_SERVER" ]; do
+        echo -e "     ${RED}⚠ SMTP сервер обязателен!${NC}"
+        read -p "     SMTP сервер: " SMTP_SERVER
+    done
+fi
 echo -e "     ${GREEN}✓${NC} Сервер: $SMTP_SERVER"
 echo ""
 
@@ -121,8 +197,13 @@ echo -e "     587 — STARTTLS (рекомендуется)"
 echo -e "     465 — SSL/TLS"
 echo -e "     25  — без шифрования"
 echo ""
-read -p "     Порт (Enter для 587): " SMTP_PORT
-SMTP_PORT=${SMTP_PORT:-587}
+if [ -n "$OLD_SMTP_PORT" ]; then
+    read -p "     Порт (Enter — оставить текущий: $OLD_SMTP_PORT): " SMTP_PORT
+    SMTP_PORT=${SMTP_PORT:-$OLD_SMTP_PORT}
+else
+    read -p "     Порт (Enter для 587): " SMTP_PORT
+    SMTP_PORT=${SMTP_PORT:-587}
+fi
 echo -e "     ${GREEN}✓${NC} Порт: $SMTP_PORT"
 echo ""
 
@@ -130,12 +211,16 @@ echo -e "  ${BOLD}3. Логин для SMTP${NC}"
 echo -e "     Обычно это email-адрес отправителя"
 echo -e "     Пример: monitor@yourdomain.com"
 echo ""
-read -p "     Логин: " SMTP_USER
-
-while [ -z "$SMTP_USER" ]; do
-    echo -e "     ${RED}⚠ Логин обязателен!${NC}"
+if [ -n "$OLD_SMTP_USER" ]; then
+    read -p "     Логин (Enter — оставить текущий: $OLD_SMTP_USER): " SMTP_USER
+    SMTP_USER=${SMTP_USER:-$OLD_SMTP_USER}
+else
     read -p "     Логин: " SMTP_USER
-done
+    while [ -z "$SMTP_USER" ]; do
+        echo -e "     ${RED}⚠ Логин обязателен!${NC}"
+        read -p "     Логин: " SMTP_USER
+    done
+fi
 echo -e "     ${GREEN}✓${NC} Логин: $SMTP_USER"
 echo ""
 
@@ -143,14 +228,19 @@ echo -e "  ${BOLD}4. Пароль для SMTP${NC}"
 echo -e "     Для Gmail — используйте пароль приложения (App Password)"
 echo -e "     Google: Аккаунт → Безопасность → Двухэтапная → Пароли приложений"
 echo ""
-read -s -p "     Пароль: " SMTP_PASS
-echo ""
-
-while [ -z "$SMTP_PASS" ]; do
-    echo -e "     ${RED}⚠ Пароль обязателен!${NC}"
+if [ "$OLD_SMTP_PASS_SET" -eq 1 ]; then
+    read -s -p "     Пароль (Enter — оставить текущий, уже задан): " SMTP_PASS
+    echo ""
+    SMTP_PASS=${SMTP_PASS:-$OLD_SMTP_PASS}
+else
     read -s -p "     Пароль: " SMTP_PASS
     echo ""
-done
+    while [ -z "$SMTP_PASS" ]; do
+        echo -e "     ${RED}⚠ Пароль обязателен!${NC}"
+        read -s -p "     Пароль: " SMTP_PASS
+        echo ""
+    done
+fi
 echo -e "     ${GREEN}✓${NC} Пароль: задан"
 echo ""
 
@@ -158,23 +248,36 @@ echo -e "  ${BOLD}5. Email получателей${NC}"
 echo -e "     Адреса через запятую (можно несколько)"
 echo -e "     Пример: admin@company.com,duty@company.com"
 echo ""
-read -p "     Email получателей: " MAIL_TO
-
-while [ -z "$MAIL_TO" ]; do
-    echo -e "     ${RED}⚠ Хотя бы один получатель обязателен!${NC}"
+if [ "$EXISTING_RCPT_COUNT" -gt 0 ]; then
+    echo -e "     ${GREEN}Уже настроено получателей: $EXISTING_RCPT_COUNT${NC} (добавить/убрать можно через /settings)"
+    read -p "     Добавить ещё (Enter — пропустить): " MAIL_TO
+else
     read -p "     Email получателей: " MAIL_TO
-done
+    while [ -z "$MAIL_TO" ]; do
+        echo -e "     ${RED}⚠ Хотя бы один получатель обязателен!${NC}"
+        read -p "     Email получателей: " MAIL_TO
+    done
+fi
 
-RCPT_COUNT=$(echo "$MAIL_TO" | tr ',' '\n' | grep -c '@' || true)
-echo -e "     ${GREEN}✓${NC} Получателей: $RCPT_COUNT"
+if [ -n "$MAIL_TO" ]; then
+    RCPT_COUNT=$(echo "$MAIL_TO" | tr ',' '\n' | grep -c '@' || true)
+else
+    RCPT_COUNT=0
+fi
+echo -e "     ${GREEN}✓${NC} Новых получателей: $RCPT_COUNT"
 echo ""
 
 echo -e "  ${BOLD}6. Интервал проверки базы данных${NC}"
 echo -e "     Как часто (в секундах) демон проверяет новые алерты"
 echo -e "     Рекомендуется: 15 секунд (минимум 5)"
 echo ""
-read -p "     Интервал (Enter для 15): " CHECK_INTERVAL
-CHECK_INTERVAL=${CHECK_INTERVAL:-15}
+if [ -n "$OLD_INTERVAL" ]; then
+    read -p "     Интервал (Enter — оставить текущий: $OLD_INTERVAL): " CHECK_INTERVAL
+    CHECK_INTERVAL=${CHECK_INTERVAL:-$OLD_INTERVAL}
+else
+    read -p "     Интервал (Enter для 15): " CHECK_INTERVAL
+    CHECK_INTERVAL=${CHECK_INTERVAL:-15}
+fi
 
 if ! [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [ "$CHECK_INTERVAL" -lt 5 ]; then
     echo -e "     ${YELLOW}⚠${NC} Минимум 5 секунд. Установлено: 15"
@@ -187,8 +290,13 @@ echo -e "  ${BOLD}7. URL веб-интерфейса монитора${NC}"
 echo -e "     Будет добавлен в письма как ссылка"
 echo ""
 DEFAULT_URL="http://$(hostname -I | awk '{print $1}'):8080"
-read -p "     URL (Enter для $DEFAULT_URL): " MONITOR_URL
-MONITOR_URL=${MONITOR_URL:-$DEFAULT_URL}
+if [ -n "$OLD_MONITOR_URL" ]; then
+    read -p "     URL (Enter — оставить текущий: $OLD_MONITOR_URL): " MONITOR_URL
+    MONITOR_URL=${MONITOR_URL:-$OLD_MONITOR_URL}
+else
+    read -p "     URL (Enter для $DEFAULT_URL): " MONITOR_URL
+    MONITOR_URL=${MONITOR_URL:-$DEFAULT_URL}
+fi
 echo -e "     ${GREEN}✓${NC} URL: $MONITOR_URL"
 echo ""
 
@@ -203,7 +311,11 @@ echo ""
 echo -e "  📧 SMTP:       ${BOLD}${SMTP_SERVER}:${SMTP_PORT}${NC}"
 echo -e "  👤 Логин:      ${BOLD}${SMTP_USER}${NC}"
 echo -e "  🔑 Пароль:     ${BOLD}задан${NC}"
-echo -e "  📬 Получатели: ${BOLD}${MAIL_TO}${NC}"
+if [ "$EXISTING_RCPT_COUNT" -gt 0 ]; then
+    echo -e "  📬 Получатели: ${BOLD}уже есть: $EXISTING_RCPT_COUNT, новых: $RCPT_COUNT${NC}"
+else
+    echo -e "  📬 Получатели: ${BOLD}${MAIL_TO}${NC}"
+fi
 echo -e "  ⏱  Интервал:   ${BOLD}${CHECK_INTERVAL} сек${NC}"
 echo -e "  🔗 URL:        ${BOLD}${MONITOR_URL}${NC}"
 echo -e "  📁 Установка:  ${BOLD}${INSTALL_DIR}${NC}"
@@ -309,8 +421,7 @@ conn.execute("CREATE INDEX IF NOT EXISTS idx_mail_logs_key ON mail_logs(alert_ke
 conn.execute("CREATE INDEX IF NOT EXISTS idx_mail_rcpt_enabled ON mail_recipients(enabled)")
 print("    ✓ Индексы созданы")
 
-defaults = {
-    'enabled': '1',
+prompted_settings = {
     'smtp_server': os.environ.get('SMTP_SERVER_ENV', ''),
     'smtp_port': os.environ.get('SMTP_PORT_ENV', '587'),
     'smtp_user': os.environ.get('SMTP_USER_ENV', ''),
@@ -318,9 +429,30 @@ defaults = {
     'from_name': 'TRASSIR Monitor',
     'from_addr': os.environ.get('SMTP_USER_ENV', ''),
     'monitor_url': os.environ.get('MONITOR_URL_ENV', ''),
+}
+# INSERT OR REPLACE, не OR IGNORE — эти ключи реально вводятся на
+# промпте каждого запуска (install-mail-notifier.sh сам уже разрешает
+# оставить текущее значение через Enter, см. "СВЕЖАЯ УСТАНОВКА ИЛИ
+# ОБНОВЛЕНИЕ?" выше в этом скрипте). OR IGNORE здесь означало бы, что
+# при обновлении новый пароль/сервер, который человек реально ввёл,
+# тихо отбрасывался бы — строка с этим ключом уже существует с первой
+# установки, и IGNORE никогда её не трогает. К моменту этого INSERT
+# бэш-скрипт уже разрешил "взять старое или новое" сам — здесь просто
+# записывается итоговое значение, каким бы оно ни было.
+for k, v in prompted_settings.items():
+    conn.execute("INSERT OR REPLACE INTO mail_settings (key, value) VALUES (?, ?)", (k, v))
+
+# А эти — ТОЛЬКО значение по умолчанию при самой первой установке.
+# "enabled" человек может сам выключить через /settings — переустановка
+# не должна молча включать Email-уведомления обратно; "notify_interval"
+# живёт отдельно от install-time промптов и этот скрипт его никогда не
+# спрашивает. OR IGNORE здесь остаётся намеренно, в отличие от блока
+# выше.
+defaults_only = {
+    'enabled': '1',
     'notify_interval': '0',
 }
-for k, v in defaults.items():
+for k, v in defaults_only.items():
     conn.execute("INSERT OR IGNORE INTO mail_settings (key, value) VALUES (?, ?)", (k, v))
 print("    ✓ Настройки SMTP сохранены")
 

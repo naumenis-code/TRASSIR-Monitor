@@ -273,9 +273,9 @@ do_update_all() {
     echo -e "${GREEN}Dashboard update is safe and non-destructive — the database, all${NC}"
     echo -e "${GREEN}settings, and the admin password are preserved automatically.${NC}"
     if telegram_installed || email_installed; then
-        echo -e "${YELLOW}Note: Telegram/Email notifier updates will ask you to re-enter${NC}"
-        echo -e "${YELLOW}their credentials (bot token / chat IDs / SMTP login) — have them${NC}"
-        echo -e "${YELLOW}ready before continuing.${NC}"
+        echo -e "${GREEN}Telegram/Email updates are safe too — token/chat IDs/SMTP login${NC}"
+        echo -e "${GREEN}are kept automatically (just press Enter at each prompt); you only${NC}"
+        echo -e "${GREEN}need to type something if you actually want to change a value.${NC}"
     fi
     echo ""
     read -p "Continue? (y/N): " ans

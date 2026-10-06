@@ -88,6 +88,56 @@ fi
 echo ""
 
 # ============================================
+# СВЕЖАЯ УСТАНОВКА ИЛИ ОБНОВЛЕНИЕ?
+# ============================================
+# Тот же принцип, что install-trassir-monitor.sh уже применяет к порту/
+# паролю админа: наличие config.ini — единственный надёжный признак,
+# что бот уже настраивался, не отдельный флаг, который может разойтись
+# с реальностью. Раньше этот скрипт БЕЗУСЛОВНО переспрашивал токен/
+# чаты/прокси/интервал/URL при КАЖДОМ запуске, включая обычное
+# "Update all" из лаунчера, где ничего из этого человек обычно даже не
+# помнит наизусть — не просто неудобно, а реально опасно для прокси:
+# поле необязательное, и просто нажатый Enter молча стирал уже
+# настроенный прокси на каждом обновлении кода.
+IS_UPDATE=0
+OLD_TOKEN=""
+OLD_PROXY=""
+OLD_MONITOR_URL=""
+OLD_INTERVAL=""
+if [ -f "$CONFIG_FILE" ]; then
+    IS_UPDATE=1
+    OLD_TOKEN=$(grep -E '^token[[:space:]]*=' "$CONFIG_FILE" | head -1 | sed -E 's/^token[[:space:]]*=[[:space:]]*//')
+    OLD_PROXY=$(grep -E '^proxy[[:space:]]*=' "$CONFIG_FILE" | head -1 | sed -E 's/^proxy[[:space:]]*=[[:space:]]*//')
+    OLD_MONITOR_URL=$(grep -E '^monitor_url[[:space:]]*=' "$CONFIG_FILE" | head -1 | sed -E 's/^monitor_url[[:space:]]*=[[:space:]]*//')
+fi
+# CHECK_INTERVAL никогда не хранился в config.ini — он всегда был вшит
+# прямо в код tg_bot.py через sed (см. ШАГ 2 ниже), поэтому "текущее"
+# значение можно узнать только из уже лежащего на диске файла, пока
+# heredoc его не перезаписал.
+if [ "$IS_UPDATE" -eq 1 ] && [ -f "$TGBOT_PY" ]; then
+    OLD_INTERVAL=$(grep -oP '^CHECK_INTERVAL = \K[0-9]+' "$TGBOT_PY" 2>/dev/null | head -1)
+fi
+# Получатели живут в БД (telegram_chats), не в config.ini — они и так
+# не терялись при обновлении (INSERT OR IGNORE по chat_id ниже), но
+# скрипт раньше всё равно ЗАСТАВЛЯЛ вводить Chat ID заново на каждый
+# запуск, даже если получатели уже добавлены и управляются через
+# /settings. Считаем сколько их уже есть, чтобы на обновлении сделать
+# этот вопрос необязательным.
+EXISTING_CHAT_COUNT=0
+if [ "$IS_UPDATE" -eq 1 ] && [ -f "$INSTALL_DIR/data/trassir.db" ]; then
+    EXISTING_CHAT_COUNT=$("$VENV_PYTHON" -c "
+import sqlite3
+try:
+    conn = sqlite3.connect('$INSTALL_DIR/data/trassir.db')
+    print(conn.execute('SELECT COUNT(*) FROM telegram_chats').fetchone()[0])
+except Exception:
+    print(0)
+" 2>/dev/null)
+    EXISTING_CHAT_COUNT=$(echo "$EXISTING_CHAT_COUNT" | grep -oE '^[0-9]+$')
+    EXISTING_CHAT_COUNT=${EXISTING_CHAT_COUNT:-0}
+fi
+
+# ============================================
 # ЗАПРОС ПАРАМЕТРОВ У ПОЛЬЗОВАТЕЛЯ
 # ============================================
 
@@ -95,21 +145,31 @@ echo -e "${YELLOW}════════════════════�
 echo -e "${YELLOW}  НАСТРОЙКА TELEGRAM БОТА                     ${NC}"
 echo -e "${YELLOW}══════════════════════════════════════════════${NC}"
 echo ""
-echo -e "  Все параметры можно изменить позже:"
-echo -e "  • Токен и прокси: ${CYAN}$CONFIG_FILE${NC}"
-echo -e "  • Получатели: через веб-интерфейс /settings"
+if [ "$IS_UPDATE" -eq 1 ]; then
+    echo -e "  ${CYAN}Обнаружена существующая конфигурация ($CONFIG_FILE).${NC}"
+    echo -e "  ${CYAN}Режим ОБНОВЛЕНИЯ — Enter на любом вопросе ниже оставит текущее значение.${NC}"
+else
+    echo -e "  Все параметры можно изменить позже:"
+    echo -e "  • Токен и прокси: ${CYAN}$CONFIG_FILE${NC}"
+    echo -e "  • Получатели: через веб-интерфейс /settings"
+fi
 echo ""
 
 echo -e "  ${BOLD}1. Токен Telegram бота${NC}"
 echo -e "     Получите у @BotFather в Telegram командой /newbot"
 echo -e "     Формат: 123456789:ABCdefGHIjklmNOPqrstUVwxyz"
 echo ""
-read -p "     Токен: " TG_TOKEN
-
-while [ -z "$TG_TOKEN" ]; do
-    echo -e "     ${RED}Токен обязателен для работы бота!${NC}"
+if [ "$IS_UPDATE" -eq 1 ] && [ -n "$OLD_TOKEN" ]; then
+    echo -e "     Текущий: ${OLD_TOKEN:0:10}...${OLD_TOKEN: -4}"
+    read -p "     Токен (Enter — оставить текущий): " TG_TOKEN
+    TG_TOKEN=${TG_TOKEN:-$OLD_TOKEN}
+else
     read -p "     Токен: " TG_TOKEN
-done
+    while [ -z "$TG_TOKEN" ]; do
+        echo -e "     ${RED}Токен обязателен для работы бота!${NC}"
+        read -p "     Токен: " TG_TOKEN
+    done
+fi
 
 if echo "$TG_TOKEN" | grep -qE '^[0-9]+:[a-zA-Z0-9_-]+$'; then
     echo -e "     ${GREEN}✓${NC} Формат токена корректен"
@@ -123,15 +183,24 @@ echo -e "     ID чатов через запятую (можно несколь
 echo -e "     Как узнать: напишите боту @userinfobot в Telegram"
 echo -e "     Пример: 1534965455,212715740,5641611513"
 echo ""
-read -p "     Chat IDs: " TG_CHATS
-
-while [ -z "$TG_CHATS" ]; do
-    echo -e "     ${RED}Хотя бы один Chat ID обязателен!${NC}"
+if [ "$EXISTING_CHAT_COUNT" -gt 0 ]; then
+    echo -e "     ${GREEN}Уже настроено получателей: $EXISTING_CHAT_COUNT${NC} (добавить/убрать можно через /settings)"
+    read -p "     Добавить ещё Chat ID (Enter — пропустить): " TG_CHATS
+else
     read -p "     Chat IDs: " TG_CHATS
-done
+    while [ -z "$TG_CHATS" ]; do
+        echo -e "     ${RED}Хотя бы один Chat ID обязателен!${NC}"
+        read -p "     Chat IDs: " TG_CHATS
+    done
+fi
 
-CHAT_COUNT=$(echo "$TG_CHATS" | tr ',' '\n' | sed 's/ //g' | grep -c '^')
-echo -e "     ${GREEN}✓${NC} Указано чатов: $CHAT_COUNT"
+if [ -n "$TG_CHATS" ]; then
+    CHAT_COUNT=$(echo "$TG_CHATS" | tr ',' '\n' | sed 's/ //g' | grep -c '^')
+    echo -e "     ${GREEN}✓${NC} Указано новых чатов: $CHAT_COUNT"
+else
+    CHAT_COUNT=0
+    echo -e "     ${GREEN}✓${NC} Новых чатов не добавлено"
+fi
 echo ""
 
 echo -e "  ${BOLD}3. HTTP-прокси для Telegram${NC}"
@@ -139,7 +208,23 @@ echo -e "     Укажите если Telegram заблокирован в ва�
 echo -e "     Формат: http://login:password@host:port"
 echo -e "     Оставьте пустым для прямого подключения"
 echo ""
-read -p "     Прокси (Enter — без прокси): " TG_PROXY
+if [ "$IS_UPDATE" -eq 1 ]; then
+    if [ -n "$OLD_PROXY" ]; then
+        OLD_MASKED_PROXY=$(echo "$OLD_PROXY" | sed -E 's|(:\/\/[^:]+:)([^@]+)(@)|\1***\3|')
+        echo -e "     Текущий: $OLD_MASKED_PROXY"
+        read -p "     Прокси (Enter — оставить текущий, \"-\" — убрать прокси): " TG_PROXY
+        if [ "$TG_PROXY" = "-" ]; then
+            TG_PROXY=""
+        else
+            TG_PROXY=${TG_PROXY:-$OLD_PROXY}
+        fi
+    else
+        echo -e "     Сейчас: прямое подключение (без прокси)"
+        read -p "     Прокси (Enter — оставить без прокси): " TG_PROXY
+    fi
+else
+    read -p "     Прокси (Enter — без прокси): " TG_PROXY
+fi
 
 if [ -n "$TG_PROXY" ]; then
     MASKED_PROXY=$(echo "$TG_PROXY" | sed -E 's|(:\/\/[^:]+:)([^@]+)(@)|\1***\3|')
@@ -153,8 +238,13 @@ echo -e "  ${BOLD}4. Интервал проверки базы данных${NC
 echo -e "     Как часто (в секундах) бот проверяет новые алерты"
 echo -e "     Рекомендуется: 10 секунд (минимум 5)"
 echo ""
-read -p "     Интервал (Enter для 10): " CHECK_INTERVAL
-CHECK_INTERVAL=${CHECK_INTERVAL:-10}
+if [ -n "$OLD_INTERVAL" ]; then
+    read -p "     Интервал (Enter — оставить текущий: $OLD_INTERVAL): " CHECK_INTERVAL
+    CHECK_INTERVAL=${CHECK_INTERVAL:-$OLD_INTERVAL}
+else
+    read -p "     Интервал (Enter для 10): " CHECK_INTERVAL
+    CHECK_INTERVAL=${CHECK_INTERVAL:-10}
+fi
 
 if ! [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [ "$CHECK_INTERVAL" -lt 5 ]; then
     echo -e "     ${YELLOW}Интервал должен быть не менее 5 секунд${NC}"
@@ -169,8 +259,13 @@ echo -e "     Будет добавлен в сообщения как ссыл�
 echo -e "     Оставьте пустым если не нужен"
 echo ""
 DEFAULT_URL="http://$(hostname -I | awk '{print $1}'):8080"
-read -p "     URL (Enter для $DEFAULT_URL): " MONITOR_URL
-MONITOR_URL=${MONITOR_URL:-$DEFAULT_URL}
+if [ -n "$OLD_MONITOR_URL" ]; then
+    read -p "     URL (Enter — оставить текущий: $OLD_MONITOR_URL): " MONITOR_URL
+    MONITOR_URL=${MONITOR_URL:-$OLD_MONITOR_URL}
+else
+    read -p "     URL (Enter для $DEFAULT_URL): " MONITOR_URL
+    MONITOR_URL=${MONITOR_URL:-$DEFAULT_URL}
+fi
 echo -e "     ${GREEN}✓${NC} URL: $MONITOR_URL"
 echo ""
 
@@ -183,7 +278,11 @@ echo -e "${GREEN}║        ПАРАМЕТРЫ УСТАНОВКИ               
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "  Токен:      ${BOLD}${TG_TOKEN:0:12}...${TG_TOKEN: -4}${NC}"
-echo -e "  Чаты:       ${BOLD}${TG_CHATS}${NC} ($CHAT_COUNT шт.)"
+if [ "$EXISTING_CHAT_COUNT" -gt 0 ]; then
+    echo -e "  Чаты:       ${BOLD}уже есть: $EXISTING_CHAT_COUNT, новых: $CHAT_COUNT${NC}"
+else
+    echo -e "  Чаты:       ${BOLD}${TG_CHATS}${NC} ($CHAT_COUNT шт.)"
+fi
 if [ -n "$TG_PROXY" ]; then
     echo -e "  Прокси:     ${BOLD}$MASKED_PROXY${NC}"
 else
@@ -761,13 +860,21 @@ def format_alert_message(alert_data):
     arch_val = health.get('arch', '?')
     arch_str = f"{arch_val:.1f} дн" if isinstance(arch_val, (int, float)) else f"{arch_val} дн"
 
+    # Для восстановлений message (= recovery_msg) уже начинается со
+    # своего "✅" (см. формирование recovery_msg выше) — добавлять перед
+    # ним ещё и ⚠️ означает два противоречащих друг другу значка подряд
+    # на одной строке ("тревога" + "всё ок" одновременно), что и было
+    # живой жалобой. ⚠️ оставлен только для настоящих проблем, где он
+    # единственный значок на строке.
+    event_prefix = "" if is_recovery else f"{ICON_EVENT} "
+
     lines = [
         f"{emoji} <b>{header}</b>",
         "",
         f"{ICON_SERVER} <b>Сервер:</b> {server_name}",
         f"{ICON_IP} <b>IP адрес:</b> {server_ip}",
         "",
-        f"{ICON_EVENT} <b>Событие:</b> {message}",
+        f"{event_prefix}<b>Событие:</b> {message}",
     ]
 
     if downtime:
