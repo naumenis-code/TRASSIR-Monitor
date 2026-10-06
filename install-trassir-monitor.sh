@@ -366,6 +366,39 @@ python3 -m venv --upgrade-deps $INSTALL_DIR/venv 2>/dev/null || \
     python3 -m venv $INSTALL_DIR/venv
 echo "    ✓ Виртуальное окружение создано"
 
+# ============================================
+# Установка pip-пакета(ов) с резервным переходом на зеркало PyPI
+# ============================================
+# Живой случай (2026-10-06): pypi.org оказался заблокирован целиком с
+# одного из хостингов (TCP-коннект уходит в таймаут, не DNS-ошибка и
+# не отказ — похожая картина уже встречалась в этом окружении с
+# GitHub, см. CLAUDE.md) — "Обновление pip..." выглядело как зависший
+# процесс (тихая попытка ничего не печатает, даже если качает, просто
+# медленно) и человек прерывал установку раньше времени. Четыре
+# попытки по нарастающей:
+#   1. pypi.org, тихо — обычный случай, быстро и незаметно.
+#   2. pypi.org, громко (виден прогресс), дольше — реально медленная,
+#      но живая сеть теперь видна как прогресс, а не тишина.
+#   3. mirror.yandex.ru, тихо — если pypi.org заблокирован именно как
+#      хост (TCP-таймаут), это сработает почти сразу.
+#   4. mirror.yandex.ru, громко, дольше — последний шанс.
+# Если и это не помогло — печатаем точную причину и падаем явной
+# ошибкой (не тихо продолжаем с неполным окружением).
+_pip_install() {
+    pip install --index-url https://pypi.org/simple/ --timeout=600 "$@" -q 2>/dev/null && return 0
+    echo "      ⚠ pypi.org не ответил — пробуем громче и дольше..."
+    pip install --index-url https://pypi.org/simple/ --timeout=900 "$@" 2>/dev/null && return 0
+    echo "      ⚠ pypi.org недоступен (похоже на блокировку с этого хостинга) — пробуем зеркало mirror.yandex.ru..."
+    pip install --index-url https://mirror.yandex.ru/mirrors/pypi/simple/ --timeout=600 "$@" -q 2>/dev/null && return 0
+    echo "      ⚠ Зеркало не ответило — пробуем громче и дольше..."
+    pip install --index-url https://mirror.yandex.ru/mirrors/pypi/simple/ --timeout=900 "$@" && return 0
+    echo -e "${RED}      ✗ Не удалось установить [$*] ни с pypi.org, ни с mirror.yandex.ru${NC}"
+    echo "        Проверь вручную с этого сервера:"
+    echo "        curl -sS -o /dev/null -w '%{http_code}\n' --max-time 15 https://pypi.org/simple/"
+    echo "        curl -sS -o /dev/null -w '%{http_code}\n' --max-time 15 https://mirror.yandex.ru/mirrors/pypi/simple/"
+    return 1
+}
+
 # Активируем окружение
 echo ""
 echo "  • Активация окружения и установка пакетов..."
@@ -373,66 +406,54 @@ source $INSTALL_DIR/venv/bin/activate
 
 # Обновляем pip
 echo "    • Обновление pip..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 --upgrade pip setuptools wheel -q 2>/dev/null || {
-    echo "      ⚠ Первая попытка не удалась, пробуем ещё раз..."
-    pip install --index-url https://pypi.org/simple/ --timeout=900 --upgrade pip setuptools wheel
-}
+_pip_install --upgrade pip setuptools wheel
 echo "      ✓ pip обновлён"
 
 # Устанавливаем Flask
 echo "    • Установка Flask..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 flask -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 flask
+_pip_install flask
 echo "      ✓ Flask установлен"
 
 # Устанавливаем Flask-CORS
 echo "    • Установка Flask-CORS..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 flask-cors -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 flask-cors
+_pip_install flask-cors
 echo "      ✓ Flask-CORS установлен"
 
 # Устанавливаем Flask-SocketIO
 echo "    • Установка Flask-SocketIO..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 flask-socketio -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 flask-socketio
+_pip_install flask-socketio
 echo "      ✓ Flask-SocketIO установлен"
 
 # Устанавливаем requests
 echo "    • Установка requests..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 requests -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 requests
+_pip_install requests
 echo "      ✓ requests установлен"
 
 # Устанавливаем PySocks — без него requests не умеет схему socks5://
 # в параметре proxies (тихо падает с MissingSchema/ошибкой прокси).
 # Нужен для SOCKS5-варианта отправки в Telegram-боте (тот же venv).
 echo "    • Установка PySocks (поддержка SOCKS5 для requests)..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 PySocks -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 PySocks
+_pip_install PySocks
 echo "      ✓ PySocks установлен"
 
 # Устанавливаем schedule
 echo "    • Установка schedule..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 schedule -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 schedule
+_pip_install schedule
 echo "      ✓ schedule установлен"
 
 # Устанавливаем gevent (работает на Python 3.12 и 3.13, в отличие от eventlet)
 echo "    • Установка gevent..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 gevent gevent-websocket -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 gevent gevent-websocket
+_pip_install gevent gevent-websocket
 echo "      ✓ gevent установлен"
 
 # Устанавливаем gunicorn
 echo "    • Установка gunicorn..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 gunicorn -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 gunicorn
+_pip_install gunicorn
 echo "      ✓ gunicorn установлен"
 
 # Устанавливаем python-dotenv
 echo "    • Установка python-dotenv..."
-pip install --index-url https://pypi.org/simple/ --timeout=600 python-dotenv -q 2>/dev/null || \
-    pip install --index-url https://pypi.org/simple/ --timeout=900 python-dotenv
+_pip_install python-dotenv
 echo "      ✓ python-dotenv установлен"
 
 # Проверка установки

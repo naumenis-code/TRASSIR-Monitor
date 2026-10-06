@@ -111,12 +111,17 @@ _press_enter() {
 # ============================================
 # ПОЛУЧЕНИЕ НУЖНОГО install-*.sh / uninstall-*.sh
 # ============================================
-# force_fresh=0 (по умолчанию): берём соседний файл рядом с этим
-# лаунчером, если он есть — без обращения к сети вообще. force_fresh=1
-# (используется в "5. Update all"): всегда качаем свежую версию с
-# GitHub, соседний файл в этом случае игнорируется намеренно — весь
-# смысл обновления в том, чтобы получить актуальный код, а не тот, что
-# случайно лежит рядом с лаунчером с момента его собственного скачивания.
+# force_fresh=0: берём соседний файл рядом с этим лаунчером, если он
+# есть — без обращения к сети вообще. Используется только для
+# uninstall-действий (см. ниже) — там устаревшая версия куда менее
+# опасна (в основном один и тот же rm -rf/systemctl stop), и офлайн-
+# работоспособность удаления важнее. force_fresh=1 (install-пункты
+# 1/2/3 и "5. Update all"): всегда качаем свежую версию с GitHub,
+# соседний файл в этом случае игнорируется намеренно — весь смысл
+# установки/обновления в том, чтобы получить актуальный код, а не тот,
+# что случайно лежит рядом с лаунчером с момента его собственного
+# скачивания (или вообще от прошлой, более старой сессии работы с этим
+# проектом — см. комментарий внутри функции ниже про живой инцидент).
 #
 # Возвращает путь через stdout. Специально НЕ сигнализирует
 # "скачан временный / это локальный файл" через отдельную глобальную
@@ -126,11 +131,37 @@ _press_enter() {
 # вызывающий код. _run_installer() ниже поэтому решает, удалять ли
 # результат, сравнивая сам путь с $SCRIPT_DIR/$name — а не полагаясь на
 # такой флаг.
+
+# Первая строка файла, где встречается "TRASSIR Monitor vN.N" — чтобы в
+# предупреждении про локальную копию сразу было видно, какая именно
+# версия сейчас используется, а не только путь к файлу. "?", если
+# паттерн не нашёлся (например, файл повреждён или это вообще не этот
+# проект) — не гадаем, просто честно показываем, что не определили.
+_script_version_suffix() {
+    local v
+    v=$(grep -m1 -oP 'TRASSIR Monitor v[0-9][0-9.]*' "$1" 2>/dev/null)
+    if [ -n "$v" ]; then
+        printf ' (%s)' "$v"
+    else
+        printf ' (версия не определена)'
+    fi
+}
+
 _get_script() {
     local name="$1" force_fresh="${2:-0}"
     local local_path="$SCRIPT_DIR/$name"
 
     if [ "$force_fresh" -eq 0 ] && [ -s "$local_path" ]; then
+        # Живой инцидент (2026-10-06): этот путь раньше возвращал путь
+        # молча — ни единой строки о том, что используется локальный
+        # файл, а не свежая версия с GitHub. На сервере с давно лежащим
+        # рядом с лаунчером старым install-trassir-monitor.sh (версия
+        # без защиты данных при обновлении) это привело к тому, что
+        # "Install Dashboard" тихо выполнил устаревший файл вместо
+        # актуального — и БД была потеряна, потому что в той версии
+        # нет сохранения data/ перед обновлением. Теперь источник
+        # печатается всегда, независимо от того, какой веткой идём.
+        echo -e "${CYAN}  Using local copy: $local_path$(_script_version_suffix "$local_path")${NC}" >&2
         printf '%s' "$local_path"
         return 0
     fi
@@ -146,7 +177,7 @@ _get_script() {
 
     rm -f "$tmp_path"
     if [ -s "$local_path" ]; then
-        echo -e "${YELLOW}  Could not download $name (no internet?) — using local copy: $local_path${NC}" >&2
+        echo -e "${YELLOW}  Could not download $name (no internet?) — using local copy: $local_path$(_script_version_suffix "$local_path")${NC}" >&2
         printf '%s' "$local_path"
         return 0
     fi
@@ -179,7 +210,7 @@ do_install_dashboard() {
         [[ "$ans" =~ ^[Yy]$ ]] || return 0
     fi
 
-    _run_installer "install-trassir-monitor.sh"
+    _run_installer "install-trassir-monitor.sh" 1
     local rc=$?
     if [ $rc -ne 0 ]; then
         echo -e "${RED}Dashboard install failed (exit code $rc).${NC}"
@@ -196,14 +227,14 @@ do_install_dashboard() {
         echo ""
         read -p "Install Telegram notifications now? (y/N): " ans
         if [[ "$ans" =~ ^[Yy]$ ]]; then
-            _run_installer "install-telegram-notifier.sh"
+            _run_installer "install-telegram-notifier.sh" 1
         fi
     fi
     if ! email_installed; then
         echo ""
         read -p "Install Email notifications now? (y/N): " ans
         if [[ "$ans" =~ ^[Yy]$ ]]; then
-            _run_installer "install-mail-notifier.sh"
+            _run_installer "install-mail-notifier.sh" 1
         fi
     fi
     _press_enter
@@ -229,7 +260,7 @@ do_install_email() {
         read -p "Reinstall / refresh anyway? (y/N): " ans
         [[ "$ans" =~ ^[Yy]$ ]] || return 0
     fi
-    _run_installer "install-mail-notifier.sh"
+    _run_installer "install-mail-notifier.sh" 1
     _press_enter
 }
 
@@ -240,7 +271,7 @@ do_install_telegram() {
         read -p "Reinstall / refresh anyway? (y/N): " ans
         [[ "$ans" =~ ^[Yy]$ ]] || return 0
     fi
-    _run_installer "install-telegram-notifier.sh"
+    _run_installer "install-telegram-notifier.sh" 1
     _press_enter
 }
 
