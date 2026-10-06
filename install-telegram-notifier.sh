@@ -432,6 +432,14 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.ini")
 DB_PATH = os.path.join(BASE_DIR, "data", "trassir.db")
 CHECK_INTERVAL = 10  # заменяется sed при установке
 
+# Причина последнего неуспешного send_telegram_message() — до этого
+# каждая ветка отказа только print()ала в лог бота, а наружу (например,
+# в кнопку "Тест" на /settings) уходило просто True/False без единого
+# слова почему. С любым способом отправки сложнее прямого (прокси,
+# особенно свой relay/worker) реальная причина сбоя — это ровно то,
+# что нужно увидеть прежде чем гадать, а не "не работает" без деталей.
+LAST_SEND_ERROR = ""
+
 # ============================================
 # РАБОТА С КОНФИГУРАЦИОННЫМ ФАЙЛОМ
 # ============================================
@@ -532,14 +540,18 @@ def _telegram_api_url(cfg, method):
 def send_telegram_message(chat_id, text):
     """
     Отправляет HTML-сообщение в Telegram.
-    Возвращает True если успешно.
+    Возвращает True если успешно. Причина неуспеха — в LAST_SEND_ERROR
+    (см. её же комментарий выше по файлу), не только в print()/логе.
     """
+    global LAST_SEND_ERROR
     cfg = get_config()
     if not cfg or not cfg['token']:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO токен не настроен")
+        LAST_SEND_ERROR = "Токен не настроен"
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO {LAST_SEND_ERROR}")
         return False
     if not chat_id:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO не указан chat_id")
+        LAST_SEND_ERROR = "Не указан chat_id"
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO {LAST_SEND_ERROR}")
         return False
 
     try:
@@ -552,25 +564,42 @@ def send_telegram_message(chat_id, text):
         }
         response = requests.post(url, json=payload, proxies=get_proxies(), timeout=15)
         if response.status_code == 200:
-            result = response.json()
+            try:
+                result = response.json()
+            except ValueError:
+                # Код 200, но тело не JSON — типичный симптом "домен отвечает,
+                # но это не реальный Bot API" (например HTML-страница ошибки
+                # от собственного relay/worker пользователя).
+                LAST_SEND_ERROR = f"HTTP 200, но ответ не похож на Telegram API: {response.text[:200]!r}"
+                print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO {LAST_SEND_ERROR}")
+                return False
             if result.get('ok'):
+                LAST_SEND_ERROR = ""
                 return True
-            err = result.get('description', 'Неизвестная ошибка')
-            print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO Telegram API: {err}")
+            LAST_SEND_ERROR = result.get('description', 'Неизвестная ошибка Telegram API')
+            print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO Telegram API: {LAST_SEND_ERROR}")
             return False
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO HTTP {response.status_code}")
+        # Непустое тело при ошибке часто самое полезное — особенно для
+        # своего relay/worker: 404 (не тот путь), 401/403 (неверный ключ),
+        # 502/503 (сам relay не достучался до настоящего Telegram) и т.п.
+        LAST_SEND_ERROR = f"HTTP {response.status_code}: {response.text[:200]!r}"
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO {LAST_SEND_ERROR}")
         return False
     except requests.exceptions.Timeout:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO таймаут подключения к Telegram")
+        LAST_SEND_ERROR = "Таймаут подключения"
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO {LAST_SEND_ERROR}")
         return False
     except requests.exceptions.ProxyError as e:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO прокси: {e}")
+        LAST_SEND_ERROR = f"Ошибка прокси: {e}"
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO {LAST_SEND_ERROR}")
         return False
-    except requests.exceptions.ConnectionError:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO ошибка соединения")
+    except requests.exceptions.ConnectionError as e:
+        LAST_SEND_ERROR = f"Ошибка соединения: {e}"
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO {LAST_SEND_ERROR}")
         return False
     except Exception as e:
-        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO неизвестная ошибка отправки: {e}")
+        LAST_SEND_ERROR = f"Неизвестная ошибка отправки: {e}"
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] ERRO {LAST_SEND_ERROR}")
         return False
 
 

@@ -2538,7 +2538,14 @@ def api_telegram_test():
         monitor_url = cfg.get("monitor_url", "") if cfg else ""
         msg = mod.format_test_message(monitor_url)
         ok = mod.send_telegram_message(chats[0]["chat_id"], msg)
-        return jsonify({"ok": 1 if ok else 0})
+        if ok:
+            return jsonify({"ok": 1, "message": "Тестовое сообщение отправлено"})
+        # LAST_SEND_ERROR — реальная причина сбоя (HTTP-код + тело ответа,
+        # таймаут, ошибка прокси и т.п., см. её же комментарий в tg_bot.py) —
+        # раньше здесь просто возвращался bare ok=0 без единого слова почему,
+        # и кнопка "Тест" на /settings показывала голый крестик без текста.
+        error = getattr(mod, "LAST_SEND_ERROR", "") or "Отправка не удалась (причина не определена)"
+        return jsonify({"ok": 0, "error": error})
     except Exception as e:
         return jsonify({"ok": 0, "error": str(e)}), 500
 
