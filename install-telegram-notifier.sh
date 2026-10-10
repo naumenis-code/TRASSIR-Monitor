@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor — Telegram Bot Installer v6.1 FIXED
+# TRASSIR Monitor — Telegram Bot Installer v6.2
 # ============================================
 # Исправлены:
 #   - SyntaxError: эмодзи в Python коде (heredoc)
@@ -32,7 +32,7 @@ clear
 
 echo -e "${CYAN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                              ║${NC}"
-echo -e "${CYAN}║   TRASSIR Monitor — Telegram Bot v6.1        ║${NC}"
+echo -e "${CYAN}║   TRASSIR Monitor — Telegram Bot v6.2        ║${NC}"
 echo -e "${CYAN}║   Автономный демон + Web-управление          ║${NC}"
 echo -e "${CYAN}║   HTTP-прокси • Много получателей            ║${NC}"
 echo -e "${CYAN}║   Восстановление каналов и серверов          ║${NC}"
@@ -145,9 +145,29 @@ echo -e "${YELLOW}════════════════════�
 echo -e "${YELLOW}  НАСТРОЙКА TELEGRAM БОТА                     ${NC}"
 echo -e "${YELLOW}══════════════════════════════════════════════${NC}"
 echo ""
+
+# На обновлении по умолчанию ничего не спрашиваем вообще — тот же
+# принцип, что install-trassir-monitor.sh уже применяет к порту и
+# паролю администратора на IS_UPDATE=1 (см. его же комментарий "Режим
+# ОБНОВЛЕНИЯ: ... сохранены"). До этой правки здесь всё равно было
+# 4-5 отдельных "Enter — оставить текущий" подряд (токен/чаты/прокси/
+# интервал/URL) — лучше, чем вынужденный re-type (см. комментарий
+# выше), но на обычном "Update all", где по факту меняется только код,
+# человеку приходилось жать Enter N раз просто чтобы НИЧЕГО не менять.
+# Один явный вопрос в начале вместо N неявных по каждому полю.
+RECONFIGURE=1
 if [ "$IS_UPDATE" -eq 1 ]; then
     echo -e "  ${CYAN}Обнаружена существующая конфигурация ($CONFIG_FILE).${NC}"
-    echo -e "  ${CYAN}Режим ОБНОВЛЕНИЯ — Enter на любом вопросе ниже оставит текущее значение.${NC}"
+    echo -e "  ${CYAN}Режим ОБНОВЛЕНИЯ — текущие токен/чаты/прокси/интервал/URL сохраняются автоматически.${NC}"
+    echo ""
+    read -p "  Изменить что-то из этого сейчас? (Enter — нет, оставить как есть / y — да): " want_reconfigure
+    echo ""
+    if [[ "$want_reconfigure" =~ ^[Yy]$ ]]; then
+        RECONFIGURE=1
+    else
+        RECONFIGURE=0
+    fi
+    echo -e "  ${CYAN}Ниже Enter на любом вопросе всё равно оставит текущее значение.${NC}"
 else
     echo -e "  Все параметры можно изменить позже:"
     echo -e "  • Токен и прокси: ${CYAN}$CONFIG_FILE${NC}"
@@ -161,8 +181,13 @@ echo -e "     Формат: 123456789:ABCdefGHIjklmNOPqrstUVwxyz"
 echo ""
 if [ "$IS_UPDATE" -eq 1 ] && [ -n "$OLD_TOKEN" ]; then
     echo -e "     Текущий: ${OLD_TOKEN:0:10}...${OLD_TOKEN: -4}"
-    read -p "     Токен (Enter — оставить текущий): " TG_TOKEN
-    TG_TOKEN=${TG_TOKEN:-$OLD_TOKEN}
+    if [ "$RECONFIGURE" -eq 1 ]; then
+        read -p "     Токен (Enter — оставить текущий): " TG_TOKEN
+        TG_TOKEN=${TG_TOKEN:-$OLD_TOKEN}
+    else
+        TG_TOKEN="$OLD_TOKEN"
+        echo -e "     ${GREEN}✓${NC} Оставлен текущий токен"
+    fi
 else
     read -p "     Токен: " TG_TOKEN
     while [ -z "$TG_TOKEN" ]; do
@@ -185,7 +210,11 @@ echo -e "     Пример: 1534965455,212715740,5641611513"
 echo ""
 if [ "$EXISTING_CHAT_COUNT" -gt 0 ]; then
     echo -e "     ${GREEN}Уже настроено получателей: $EXISTING_CHAT_COUNT${NC} (добавить/убрать можно через /settings)"
-    read -p "     Добавить ещё Chat ID (Enter — пропустить): " TG_CHATS
+    if [ "$RECONFIGURE" -eq 1 ]; then
+        read -p "     Добавить ещё Chat ID (Enter — пропустить): " TG_CHATS
+    else
+        TG_CHATS=""
+    fi
 else
     read -p "     Chat IDs: " TG_CHATS
     while [ -z "$TG_CHATS" ]; do
@@ -212,15 +241,24 @@ if [ "$IS_UPDATE" -eq 1 ]; then
     if [ -n "$OLD_PROXY" ]; then
         OLD_MASKED_PROXY=$(echo "$OLD_PROXY" | sed -E 's|(:\/\/[^:]+:)([^@]+)(@)|\1***\3|')
         echo -e "     Текущий: $OLD_MASKED_PROXY"
-        read -p "     Прокси (Enter — оставить текущий, \"-\" — убрать прокси): " TG_PROXY
-        if [ "$TG_PROXY" = "-" ]; then
-            TG_PROXY=""
+        if [ "$RECONFIGURE" -eq 1 ]; then
+            read -p "     Прокси (Enter — оставить текущий, \"-\" — убрать прокси): " TG_PROXY
+            if [ "$TG_PROXY" = "-" ]; then
+                TG_PROXY=""
+            else
+                TG_PROXY=${TG_PROXY:-$OLD_PROXY}
+            fi
         else
-            TG_PROXY=${TG_PROXY:-$OLD_PROXY}
+            TG_PROXY="$OLD_PROXY"
+            echo -e "     ${GREEN}✓${NC} Оставлен текущий прокси"
         fi
     else
         echo -e "     Сейчас: прямое подключение (без прокси)"
-        read -p "     Прокси (Enter — оставить без прокси): " TG_PROXY
+        if [ "$RECONFIGURE" -eq 1 ]; then
+            read -p "     Прокси (Enter — оставить без прокси): " TG_PROXY
+        else
+            TG_PROXY=""
+        fi
     fi
 else
     read -p "     Прокси (Enter — без прокси): " TG_PROXY
@@ -239,11 +277,19 @@ echo -e "     Как часто (в секундах) бот проверяет 
 echo -e "     Рекомендуется: 10 секунд (минимум 5)"
 echo ""
 if [ -n "$OLD_INTERVAL" ]; then
-    read -p "     Интервал (Enter — оставить текущий: $OLD_INTERVAL): " CHECK_INTERVAL
-    CHECK_INTERVAL=${CHECK_INTERVAL:-$OLD_INTERVAL}
+    if [ "$RECONFIGURE" -eq 1 ]; then
+        read -p "     Интервал (Enter — оставить текущий: $OLD_INTERVAL): " CHECK_INTERVAL
+        CHECK_INTERVAL=${CHECK_INTERVAL:-$OLD_INTERVAL}
+    else
+        CHECK_INTERVAL="$OLD_INTERVAL"
+    fi
 else
-    read -p "     Интервал (Enter для 10): " CHECK_INTERVAL
-    CHECK_INTERVAL=${CHECK_INTERVAL:-10}
+    if [ "$RECONFIGURE" -eq 1 ]; then
+        read -p "     Интервал (Enter для 10): " CHECK_INTERVAL
+        CHECK_INTERVAL=${CHECK_INTERVAL:-10}
+    else
+        CHECK_INTERVAL=10
+    fi
 fi
 
 if ! [[ "$CHECK_INTERVAL" =~ ^[0-9]+$ ]] || [ "$CHECK_INTERVAL" -lt 5 ]; then
@@ -260,11 +306,19 @@ echo -e "     Оставьте пустым если не нужен"
 echo ""
 DEFAULT_URL="http://$(hostname -I | awk '{print $1}'):8080"
 if [ -n "$OLD_MONITOR_URL" ]; then
-    read -p "     URL (Enter — оставить текущий: $OLD_MONITOR_URL): " MONITOR_URL
-    MONITOR_URL=${MONITOR_URL:-$OLD_MONITOR_URL}
+    if [ "$RECONFIGURE" -eq 1 ]; then
+        read -p "     URL (Enter — оставить текущий: $OLD_MONITOR_URL): " MONITOR_URL
+        MONITOR_URL=${MONITOR_URL:-$OLD_MONITOR_URL}
+    else
+        MONITOR_URL="$OLD_MONITOR_URL"
+    fi
 else
-    read -p "     URL (Enter для $DEFAULT_URL): " MONITOR_URL
-    MONITOR_URL=${MONITOR_URL:-$DEFAULT_URL}
+    if [ "$RECONFIGURE" -eq 1 ]; then
+        read -p "     URL (Enter для $DEFAULT_URL): " MONITOR_URL
+        MONITOR_URL=${MONITOR_URL:-$DEFAULT_URL}
+    else
+        MONITOR_URL="$DEFAULT_URL"
+    fi
 fi
 echo -e "     ${GREEN}✓${NC} URL: $MONITOR_URL"
 echo ""
@@ -494,7 +548,7 @@ cat > "$TGBOT_PY" << 'TGBOTEOF'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TRASSIR Monitor -- Telegram Bot Daemon v6.1 FIXED
+TRASSIR Monitor -- Telegram Bot Daemon v6.2
 Автономный мониторинг базы данных и отправка уведомлений в Telegram
 
 Принцип работы:
@@ -1132,7 +1186,7 @@ def is_telegram_enabled():
 
 def run_bot():
     """Основной бесконечный цикл работы бота."""
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Telegram Bot v6.1 запускается...")
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Telegram Bot v6.2 запускается...")
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] БД: {DB_PATH}")
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] Интервал: {CHECK_INTERVAL} сек")
 
@@ -1347,10 +1401,17 @@ if [ "$BOT_STATUS" != "active" ]; then
 fi
 
 echo ""
-echo "  • Отправка тестового сообщения..."
-source "$INSTALL_DIR/venv/bin/activate"
+# Тестовое сообщение ("Бот установлен!") имеет смысл на свежей установке
+# или когда настройки реально менялись (RECONFIGURE=1) — на обычном
+# "Update all", где токен/чаты/прокси молча остались как были (см.
+# RECONFIGURE выше), слать в Telegram "бот установлен" на каждое
+# обновление КОДА — сбивающий с толку спам: ничего не было переустановлено
+# с точки зрения получателя сообщения, только код на сервере.
+if [ "$IS_UPDATE" -eq 0 ] || [ "$RECONFIGURE" -eq 1 ]; then
+    echo "  • Отправка тестового сообщения..."
+    source "$INSTALL_DIR/venv/bin/activate"
 
-TEST_RESULT=$($VENV_PYTHON << 'PYEOF'
+    TEST_RESULT=$($VENV_PYTHON << 'PYEOF'
 import sys, os
 sys.path.insert(0, '/opt/trassir-monitor')
 os.chdir('/opt/trassir-monitor')
@@ -1372,31 +1433,35 @@ else:
 PYEOF
 )
 
-deactivate
+    deactivate
 
-case "$TEST_RESULT" in
-    OK)
-        echo -e "  ${GREEN}Тестовое сообщение отправлено успешно!${NC}"
-        echo "     Проверьте Telegram — должно прийти сообщение."
-        ;;
-    NO_CHATS)
-        echo -e "  ${YELLOW}Нет получателей для отправки теста${NC}"
-        echo "     Добавьте получателей через веб-интерфейс /settings"
-        ;;
-    *)
-        echo -e "  ${RED}Тестовое сообщение не отправлено${NC}"
-        echo ""
-        echo "  Возможные причины:"
-        echo "    1. Неправильный токен бота"
-        echo "    2. Прокси не работает или не указан"
-        echo "    3. Нет доступа к api.telegram.org"
-        echo "    4. Неправильный Chat ID"
-        echo ""
-        echo "  Проверьте:"
-        echo "    nano $CONFIG_FILE"
-        echo "    tail -f $LOG_DIR/tgbot.log"
-        ;;
-esac
+    case "$TEST_RESULT" in
+        OK)
+            echo -e "  ${GREEN}Тестовое сообщение отправлено успешно!${NC}"
+            echo "     Проверьте Telegram — должно прийти сообщение."
+            ;;
+        NO_CHATS)
+            echo -e "  ${YELLOW}Нет получателей для отправки теста${NC}"
+            echo "     Добавьте получателей через веб-интерфейс /settings"
+            ;;
+        *)
+            echo -e "  ${RED}Тестовое сообщение не отправлено${NC}"
+            echo ""
+            echo "  Возможные причины:"
+            echo "    1. Неправильный токен бота"
+            echo "    2. Прокси не работает или не указан"
+            echo "    3. Нет доступа к api.telegram.org"
+            echo "    4. Неправильный Chat ID"
+            echo ""
+            echo "  Проверьте:"
+            echo "    nano $CONFIG_FILE"
+            echo "    tail -f $LOG_DIR/tgbot.log"
+            ;;
+    esac
+else
+    echo -e "  ${GREEN}✓${NC} Настройки не менялись — тестовое сообщение не отправляется"
+    echo "     (бот перезапущен, статус: $BOT_STATUS)"
+fi
 
 # ============================================
 # ФИКСАЦИЯ УСТАНОВЛЕННОГО КОММИТА (для дашборда/settings и проверки обновлений)
@@ -1460,7 +1525,7 @@ WEB_PORT=${WEB_PORT:-8080}
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
-echo -e "${GREEN}║   Telegram Bot v6.1 — УСТАНОВЛЕН!            ║${NC}"
+echo -e "${GREEN}║   Telegram Bot v6.2 — УСТАНОВЛЕН!            ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
 echo ""

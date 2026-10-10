@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================
-# TRASSIR Monitor v13.0
+# TRASSIR Monitor v13.6
 # Проверено на Debian 12 13
 # ============================================
 set -e
@@ -23,7 +23,7 @@ clear
 # Баннер
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
-echo -e "${GREEN}║   TRASSIR Monitor v13.0 — Final Complete     ║${NC}"
+echo -e "${GREEN}║   TRASSIR Monitor v13.6 — Final Complete     ║${NC}"
 echo -e "${GREEN}║   Имена каналов • Алерты • Live дашборд      ║${NC}"
 echo -e "${GREEN}║   Debian 12/13 • gevent • Python 3.12/3.13   ║${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
@@ -230,14 +230,33 @@ fi
 # этой сохранёнки ШАГ 5 остался бы без единого рабочего пакета после
 # `rm -rf $INSTALL_DIR`, потому что качать их заново было бы неоткуда.
 DATA_PRESERVE_DIR=""
-if [ "$IS_UPDATE" -eq 1 ] && [ -d "$INSTALL_DIR/data" ]; then
-    echo "  • Сохранение базы данных и статических файлов перед обновлением..."
+if [ "$IS_UPDATE" -eq 1 ]; then
     DATA_PRESERVE_DIR=$(mktemp -d)
-    cp -a "$INSTALL_DIR/data" "$DATA_PRESERVE_DIR/data"
-    if [ -d "$INSTALL_DIR/static" ]; then
-        cp -a "$INSTALL_DIR/static" "$DATA_PRESERVE_DIR/static"
+    if [ -d "$INSTALL_DIR/data" ]; then
+        echo "  • Сохранение базы данных и статических файлов перед обновлением..."
+        cp -a "$INSTALL_DIR/data" "$DATA_PRESERVE_DIR/data"
+        if [ -d "$INSTALL_DIR/static" ]; then
+            cp -a "$INSTALL_DIR/static" "$DATA_PRESERVE_DIR/static"
+        fi
+        echo "    ✓ data/ и static/ сохранены во временный каталог"
     fi
-    echo "    ✓ data/ и static/ сохранены во временный каталог"
+    # config.ini/config_tgproxy.ini — настройки Telegram-бота (токен,
+    # прокси, monitor_url), живут прямо в $INSTALL_DIR, а не в data/.
+    # Живой баг, подтверждён на реальном сервере: до этой правки
+    # `rm -rf $INSTALL_DIR` ниже уничтожал их при КАЖДОМ обновлении
+    # самого дашборда (install-trassir-monitor.sh), хотя сам
+    # install-telegram-notifier.sh умеет сохранять токен между СВОИМИ
+    # обновлениями через IS_UPDATE/[ -f "$CONFIG_FILE" ] (см. его же
+    # комментарий "СВЕЖАЯ УСТАНОВКА ИЛИ ОБНОВЛЕНИЕ?") — он просто
+    # ничего не мог сохранить, потому что файл к его запуску уже не
+    # существовал. Снаружи выглядело так, будто уже исправленный баг
+    # вернулся — реальная причина была в соседнем скрипте, не в нём.
+    for cfg in config.ini config_tgproxy.ini; do
+        if [ -f "$INSTALL_DIR/$cfg" ]; then
+            cp -a "$INSTALL_DIR/$cfg" "$DATA_PRESERVE_DIR/$cfg"
+            echo "    ✓ $cfg сохранён (настройки Telegram-бота)"
+        fi
+    done
 fi
 
 # Удаляем старый каталог
@@ -341,6 +360,15 @@ if [ -n "$DATA_PRESERVE_DIR" ] && [ -d "$DATA_PRESERVE_DIR/static" ]; then
     rm -rf "$INSTALL_DIR/static"
     cp -a "$DATA_PRESERVE_DIR/static" "$INSTALL_DIR/static"
     echo "    ✓ static/ восстановлен ($(du -sh "$INSTALL_DIR/static" 2>/dev/null | cut -f1))"
+fi
+# config.ini/config_tgproxy.ini — см. комментарий у их сохранения в ШАГе 1.
+if [ -n "$DATA_PRESERVE_DIR" ]; then
+    for cfg in config.ini config_tgproxy.ini; do
+        if [ -f "$DATA_PRESERVE_DIR/$cfg" ]; then
+            cp -a "$DATA_PRESERVE_DIR/$cfg" "$INSTALL_DIR/$cfg"
+            echo "    ✓ $cfg восстановлен (настройки Telegram-бота)"
+        fi
+    done
 fi
 rm -rf "$DATA_PRESERVE_DIR" 2>/dev/null || true
 
@@ -480,7 +508,7 @@ echo ""
 cat > $INSTALL_DIR/app/app.py << 'APPEOF'
 #!/usr/bin/env python3
 """
-TRASSIR Monitor v13.0 — Основной файл приложения
+TRASSIR Monitor v13.6 — Основной файл приложения
 Полная версия с определением имён отключённых каналов
 
 Функции:
@@ -518,18 +546,25 @@ TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
 DB_PATH = os.path.join(BASE_DIR, "data", "trassir.db")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 SECRET_KEY_PATH = os.path.join(BASE_DIR, "data", "secret_key.txt")
-CONFIG_BACKUP_DIR = os.path.join(BASE_DIR, "data", "config_backups")
-CONFIG_BACKUP_KEEP = 5  # сколько последних бэкапов на регистратор хранить
 
-# Бэкап СОБСТВЕННЫХ настроек монитора (список серверов + Telegram + Email) —
-# отдельно от CONFIG_BACKUP_* выше, который снимает дерево настроек САМОГО
-# TRASSIR через SDK. Это разные вещи: то, что нужно восстановить после
-# переустановки монитора (список серверов, токен/чаты Telegram, SMTP/
-# получатели Email), не требует ни одного обращения к TRASSIR вообще —
-# всё уже лежит в trassir.db (и в config.ini — токен Telegram-бота).
+# Бэкап настроек монитора (список серверов + Telegram + Email) — не
+# требует ни одного обращения к TRASSIR, всё уже лежит в trassir.db (и
+# в config.ini — токен Telegram-бота). Бэкап дерева настроек САМОГО
+# TRASSIR через SDK (/settings/) был здесь раньше и убран 2026-10-06 —
+# см. CLAUDE.md, этот эндпоинт без рекурсивного обхода отдаёт только
+# имена папок/полей верхнего уровня, не сами значения, то есть не
+# является настоящим бэкапом в текущем виде.
 APP_BACKUP_DIR = os.path.join(BASE_DIR, "data", "app_backups")
 APP_BACKUP_KEEP = 5
-APP_VERSION = "v13.0"
+APP_VERSION = "v13.6"
+
+# Срок хранения локального архива входов в TRASSIR (login_events, см.
+# collect_login_events() ниже) — прямой запрос пользователя: "до 2 недель
+# или 1 недели". Отдельная константа, не настройка "Хранение данных"
+# (retention_days, управляет health/alerts) — это аудит-данные другой
+# природы, может иметь свой срок независимо от того, на что настроены
+# графики метрик.
+LOGIN_EVENTS_RETENTION_DAYS = 14
 
 # ============================================
 # ИНИЦИАЛИЗАЦИЯ FLASK
@@ -812,30 +847,6 @@ def init_db():
     """)
 
     # ============================================
-    # Таблица config_backups — история бэкапов настроек
-    # регистраторов, снятых через SDK /settings/
-    # (см. backup_server_settings()). Сам JSON лежит файлом на диске
-    # (data/config_backups/<server_id>/...), здесь только метаданные —
-    # settings-дерево может быть большим, незачем раздувать sqlite.
-    # Это НЕ то же самое, что родной бэкап TRASSIR Client'а
-    # (.settings-backup/.dump) — тот создаётся кнопкой в самом клиенте
-    # через порт управления, SDK туда не достаёт. Это JSON-снимок
-    # дерева настроек через /settings/, для просмотра/диагностики и
-    # восстановления значений вручную, не байт-в-байт родной формат.
-    # ============================================
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS config_backups (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            server_id INTEGER NOT NULL,
-            ts DATETIME DEFAULT CURRENT_TIMESTAMP,
-            ok BOOLEAN DEFAULT 1,
-            file_path TEXT DEFAULT '',
-            size_bytes INTEGER DEFAULT 0,
-            error TEXT DEFAULT ''
-        )
-    """)
-
-    # ============================================
     # Таблица health — история здоровья серверов
     # ============================================
     cursor.execute("""
@@ -971,7 +982,43 @@ def init_db():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mail_logs_key ON mail_logs(alert_key, ts)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_health_srv_time ON health(server_id, ts)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_alerts_srv ON alerts(server_id, ack)")
-    
+
+    # ============================================
+    # Таблица login_events — локальный архив входов в TRASSIR
+    # ============================================
+    # Лента событий на странице сервера (см. /api/events/<id>) читает
+    # /events СЕЙЧАС, вживую, с самого TRASSIR — ничего не сохраняет.
+    # Прямой запрос пользователя: TRASSIR хранит свой буфер событий сам,
+    # размер/срок жизни которого нигде не документирован (см. комментарий
+    # у TrassirClient.get_events() выше) — если никто не держал страницу
+    # открытой, когда буфер провернулся, вход теряется безвозвратно.
+    # Это отдельная таблица, не привязанная к health/alerts — никогда не
+    # участвует в их логике (авто-закрытие и т.п.), только append-only
+    # запись + периодическая чистка по сроку (см. collect_login_events()
+    # и cleanup_old_data() ниже).
+    # UNIQUE(server_id, raw_timestamp) — /events у TRASSIR не поддерживает
+    # курсор "только новое с прошлого опроса" (см. мануал), каждый опрос
+    # отдаёт целый буфер заново, поэтому один и тот же вход будет
+    # встречаться в НЕСКОЛЬКИХ последовательных опросах подряд.
+    # raw_timestamp (сырое микросекундное значение от TRASSIR) — надёжный
+    # естественный ключ для дедупликации, в отличие от (username,
+    # ip_address) — у одного пользователя может быть несколько реальных
+    # входов подряд с одного и того же IP.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS login_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER NOT NULL,
+            raw_timestamp TEXT NOT NULL,
+            event_time DATETIME,
+            username TEXT,
+            ip_address TEXT,
+            collected_at DATETIME DEFAULT (datetime('now', '+3 hours')),
+            FOREIGN KEY (server_id) REFERENCES servers (id),
+            UNIQUE (server_id, raw_timestamp)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_login_events_srv_time ON login_events(server_id, event_time)")
+
     # ============================================
     # Настройки по умолчанию
     # ============================================
@@ -1218,59 +1265,96 @@ class TrassirClient:
         except Exception as e:
             return {"ok": 0, "error": str(e)}
 
-    def get_settings(self):
+    def list_channels(self):
         """
-        Получает ПОЛНОЕ дерево настроек сервера через SDK-эндпоинт
-        /settings/ — сеть, IP-камеры, архив, COM-порты, скриншоты и т.д.
-        Используется только для бэкапа конфигурации (см.
-        backup_server_settings()) — сам этот метод ничего не пишет на
-        сервер, только читает.
-
-        Авторизация — та же схема, что у get()/get_channels_info()
-        (query-параметр password=SDK-пароль), не login+sid из публичных
-        примеров TRASSIR — другая схема здесь никогда не проверялась
-        живьём, а эта уже подтверждённо работает для /health и /objects/
-        на этом же сервере с тем же паролем.
-
-        Требует отдельного флага SDK "Чтение настроек" на регистраторе
-        (отдельного от того, что нужен для /health и /objects/). Если он
-        не включён, сервер может ответить не 200 или не-JSON — в этом
-        случае возвращаем сырую причину в "error", а не глохнем молча,
-        чтобы в UI было видно ЧТО конкретно не так на конкретном сервере.
+        Лёгкий список каналов (guid+имя) — один запрос к /objects/, без
+        дополнительного опроса состояния КАЖДОГО канала (в отличие от
+        get_channels_info(), которая делает ещё N запросов ради online/
+        offline). Нужен только для построения сетки скриншотов на
+        странице сервера — там online/offline не требуется, достаточно
+        знать, какие каналы есть.
         """
         try:
             params = {"password": self.sdk} if self.sdk else {}
-
-            response = self.session.get(
-                f"{self.url}/settings/",
-                params=params,
-                timeout=30
-            )
+            response = self.session.get(f"{self.url}/objects/", params=params, timeout=10)
 
             if response.status_code != 200:
-                return {
-                    "ok": 0,
-                    "error": f"HTTP {response.status_code}: {response.text[:300]!r}"
-                }
+                return {"ok": 0, "error": f"HTTP {response.status_code}"}
 
-            text = response.text
-            text = re.sub(r'//.*?\n', '\n', text)
-            text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+            all_objects = json.loads(response.text)
+            channels = [
+                {"guid": obj.get("guid", ""), "name": obj.get("name", "Unknown")}
+                for obj in all_objects
+                if obj.get("class") == "Channel" and obj.get("guid")
+            ]
+            return {"ok": 1, "channels": channels}
 
-            try:
-                data = json.loads(text)
-            except ValueError as e:
-                return {
-                    "ok": 0,
-                    "error": f"Сервер ответил не-JSON (не включена 'Чтение настроек' в SDK?): {e} — {text[:300]!r}"
-                }
+        except Exception as e:
+            return {"ok": 0, "error": str(e)}
 
-            return {"ok": 1, "data": data}
+    def get_screenshot(self, channel_guid):
+        """
+        Скриншот канала — SDK-команда /screenshot/{guid} (см. "Request
+        a screenshot" в SDK-мануале). Возвращает сырые байты JPEG.
+
+        Отдельный, короче обычного, таймаут — это разовый интерактивный
+        запрос с открытой страницы сервера, не фоновый опрос: если одна
+        камера не отвечает, пользователь не должен ждать её 10 секунд,
+        остальные скриншоты на той же странице от неё не зависят (каждый
+        грузится своим отдельным запросом из браузера).
+        """
+        try:
+            params = {"password": self.sdk} if self.sdk else {}
+            response = self.session.get(
+                f"{self.url}/screenshot/{channel_guid}",
+                params=params,
+                timeout=8
+            )
+            content_type = response.headers.get("content-type", "")
+            if response.status_code == 200 and content_type.startswith("image/"):
+                return {"ok": 1, "data": response.content, "content_type": content_type}
+            return {"ok": 0, "error": f"HTTP {response.status_code}"}
 
         except requests.exceptions.Timeout:
-            return {"ok": 0, "error": "Таймаут соединения"}
-        except requests.exceptions.ConnectionError as e:
-            return {"ok": 0, "error": f"Ошибка соединения: {e}"}
+            return {"ok": 0, "error": "Таймаут"}
+        except Exception as e:
+            return {"ok": 0, "error": str(e)}
+
+    def get_events(self, limit=30):
+        """
+        Последние события сервера — SDK-команда /events (см. "Request
+        for server events" в SDK-мануале): Motion Start/Stop, Smoke
+        Detected, Login Successful и т.п. Используется ТОЛЬКО для живой
+        ленты на странице сервера — ничего не пишет в БД, не создаёт
+        алертов и не трогает Telegram/Email-уведомления. Намеренно
+        отдельная, независимая от collect() и существующей логики
+        алертов фича — так проще дать гарантию, что она никак не может
+        повлиять на уже работающие алерты (CPU/диски/архив/камеры).
+
+        TRASSIR отдаёт /events как буфер последних событий — размер
+        буфера на сервере нигде не документирован, поэтому на нашей
+        стороне всегда отрезаем до `limit` самых новых перед отдачей в
+        браузер: и чтобы не раздувать страницу, и чтобы разбор большого
+        JSON не стал неожиданно медленным на сервере с активным трафиком
+        событий (много Motion Start/Stop).
+        """
+        try:
+            params = {"password": self.sdk} if self.sdk else {}
+            response = self.session.get(f"{self.url}/events", params=params, timeout=10)
+
+            if response.status_code != 200:
+                return {"ok": 0, "error": f"HTTP {response.status_code}"}
+
+            events = json.loads(response.text)
+            if not isinstance(events, list):
+                return {"ok": 0, "error": "Неожиданный формат ответа"}
+
+            events = events[-limit:]
+            events.reverse()  # новые сверху
+            return {"ok": 1, "events": events}
+
+        except requests.exceptions.Timeout:
+            return {"ok": 0, "error": "Таймаут"}
         except Exception as e:
             return {"ok": 0, "error": str(e)}
 
@@ -1751,34 +1835,42 @@ def cleanup_old_data():
             """)
             conn.commit()
             print(f"Очистка старых данных: удалены записи старше {days} дн.")
+
+        # login_events — свой, отдельный от retention_days срок хранения
+        # (см. LOGIN_EVENTS_RETENTION_DAYS выше), не завязан на условие
+        # "days > 0" настройки "Хранение данных".
+        login_cutoff = f"-{LOGIN_EVENTS_RETENTION_DAYS} days"
+        conn.execute("DELETE FROM login_events WHERE event_time < datetime('now', '+3 hours', ?)", (login_cutoff,))
+        conn.commit()
+
         conn.close()
     except Exception as e:
         print(f"Ошибка очистки старых данных: {e}")
 
 
-def backup_server_settings():
+def collect_login_events():
     """
-    Снимает дерево настроек (через SDK /settings/) с каждого активного
-    регистратора и сохраняет как JSON-файл, храня последние
-    CONFIG_BACKUP_KEEP версий на сервер (остальные удаляются — и файл,
-    и строка в config_backups).
+    Опрашивает /events каждого включённого сервера и сохраняет в
+    login_events только события входа ("Login Successful, %1 from %2" —
+    см. TrassirClient.get_events()). Прямой запрос пользователя: лента
+    на странице сервера (/api/events/<id>) читает TRASSIR вживую и
+    ничего не хранит — размер/срок жизни буфера событий на самом
+    TRASSIR нигде не документирован, так что вход, случившийся пока
+    никто не смотрел на дашборд, мог быть потерян безвозвратно, как
+    только буфер провернётся. Эта функция даёт независимый от того,
+    открыт ли сейчас дашборд, локальный архив.
 
-    Это НЕ родной бэкап TRASSIR Client'а (.settings-backup/.dump) — тот
-    через SDK недоступен (см. комментарий у таблицы config_backups и у
-    TrassirClient.get_settings()). Отказ по одному серверу (SDK-пароль
-    без прав "Чтение настроек", сервер недоступен и т.п.) не прерывает
-    бэкап остальных — ошибка просто записывается в его собственную
-    строку config_backups, видно в /settings какой конкретно сервер и
-    почему.
+    Намеренно отдельная функция со своим расписанием (см. scheduler()
+    ниже), а не часть collect() — ошибка здесь (сеть, TRASSIR не
+    ответил) не должна иметь ни малейшего шанса повлиять на health-
+    опрос/алерты/Telegram-Email, у которых свой, более частый цикл и
+    куда более высокая цена сбоя.
     """
     try:
         conn = get_db()
         servers = conn.execute("SELECT * FROM servers WHERE enabled = 1").fetchall()
 
-        os.makedirs(CONFIG_BACKUP_DIR, exist_ok=True)
-
         for server in servers:
-            server_id = server["id"]
             client = TrassirClient({
                 "ip": server["ip"],
                 "port": server["port"],
@@ -1786,58 +1878,45 @@ def backup_server_settings():
                 "sdk_password": server["sdk_password"]
             })
 
-            result = client.get_settings()
-            server_dir = os.path.join(CONFIG_BACKUP_DIR, str(server_id))
+            result = client.get_events(limit=100)
+            if not result.get("ok"):
+                continue
 
-            if result["ok"]:
-                os.makedirs(server_dir, exist_ok=True)
-                # Микросекунды, не только секунды — два бэкапа подряд
-                # (двойной клик "Снять бэкап сейчас", быстрый повторный
-                # запуск) иначе получают одинаковое имя файла и молча
-                # перезатирают друг друга на диске; с одинаковым именем
-                # у двух РАЗНЫХ строк config_backups ротация старых версий
-                # удаляет файл, на который ещё ссылается новая строка.
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                file_path = os.path.join(server_dir, f"settings_{ts}.json")
-                payload = json.dumps(result["data"], ensure_ascii=False, indent=2)
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(payload)
+            for ev in result.get("events", []):
+                if ev.get("type") != "Login Successful, %1 from %2":
+                    continue
 
-                conn.execute(
-                    "INSERT INTO config_backups (server_id, ok, file_path, size_bytes, error) "
-                    "VALUES (?, 1, ?, ?, '')",
-                    (server_id, file_path, len(payload.encode("utf-8")))
-                )
-                print(f"  {server['name']}: бэкап настроек сохранён ({len(payload)} байт)")
-            else:
-                conn.execute(
-                    "INSERT INTO config_backups (server_id, ok, file_path, size_bytes, error) "
-                    "VALUES (?, 0, '', 0, ?)",
-                    (server_id, result["error"])
-                )
-                print(f"  {server['name']}: бэкап настроек НЕ снят — {result['error']}")
+                raw_ts = ev.get("timestamp")
+                if not raw_ts:
+                    continue
 
-            # Храним только последние CONFIG_BACKUP_KEEP строк (успешных
-            # и неуспешных вместе — иначе цепочка ошибок никогда не
-            # ротируется и забивает таблицу бесполезными строками).
-            old_rows = conn.execute(
-                "SELECT id, file_path FROM config_backups WHERE server_id = ? "
-                "ORDER BY ts DESC, id DESC LIMIT -1 OFFSET ?",
-                (server_id, CONFIG_BACKUP_KEEP)
-            ).fetchall()
-            for row in old_rows:
-                if row["file_path"]:
-                    try:
-                        os.remove(row["file_path"])
-                    except OSError:
-                        pass
-                conn.execute("DELETE FROM config_backups WHERE id = ?", (row["id"],))
+                try:
+                    # timestamp от TRASSIR — микросекунды, уже посчитанные
+                    # по часовому поясу, настроенному НА САМОМ СЕРВЕРЕ (см.
+                    # CLAUDE.md "Event feed timestamps were 3 hours ahead
+                    # of real time" и аналогичный фикс {timeZone:'UTC'} в
+                    # JS). utcfromtimestamp() здесь не означает "это UTC" —
+                    # означает "взять цифры как есть, не сдвигать их ещё
+                    # раз", та же логика, что и на фронтенде.
+                    event_dt = datetime.utcfromtimestamp(int(raw_ts) / 1_000_000)
+                    event_time_str = event_dt.strftime("%Y-%m-%d %H:%M:%S")
+                except (ValueError, OSError, OverflowError):
+                    continue
+
+                conn.execute("""
+                    INSERT OR IGNORE INTO login_events
+                        (server_id, raw_timestamp, event_time, username, ip_address)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    server["id"], str(raw_ts), event_time_str,
+                    ev.get("username", ""), ev.get("ip_address", "")
+                ))
 
             conn.commit()
 
         conn.close()
     except Exception as e:
-        print(f"Ошибка бэкапа настроек регистраторов: {e}")
+        print(f"Ошибка сбора истории входов: {e}")
 
 
 def _telegram_ini_path():
@@ -1914,18 +1993,18 @@ def backup_app_settings():
     """
     Снимает бэкап собственных настроек монитора (список серверов +
     Telegram + Email, см. _collect_app_backup_data()) в один JSON-файл,
-    храня последние APP_BACKUP_KEEP версий. В отличие от
-    backup_server_settings() (дерево настроек САМОГО TRASSIR через SDK)
-    это не требует ни одного обращения к сети — только чтение БД и
-    одного локального config.ini, поэтому не нуждается в per-item
-    обработке ошибок: либо весь файл снялся, либо нет.
+    храня последние APP_BACKUP_KEEP версий. Не требует ни одного
+    обращения к сети — только чтение БД и одного локального
+    config.ini, поэтому не нуждается в per-item обработке ошибок: либо
+    весь файл снялся, либо нет.
     """
     try:
         os.makedirs(APP_BACKUP_DIR, exist_ok=True)
         data = _collect_app_backup_data()
 
-        # Микросекунды — см. комментарий у backup_server_settings()
-        # про коллизию имён файлов при двух бэкапах в одну секунду.
+        # Микросекунды, не только секунды — иначе два бэкапа подряд
+        # (двойной клик "Снять бэкап сейчас") получают одинаковое имя
+        # файла и молча перезатирают друг друга на диске.
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         file_path = os.path.join(APP_BACKUP_DIR, f"app_backup_{ts}.json")
         payload = json.dumps(data, ensure_ascii=False, indent=2)
@@ -2069,13 +2148,18 @@ def scheduler():
     # Настраиваем периодический запуск
     schedule.every(interval).seconds.do(collect)
     schedule.every(1).hours.do(cleanup_old_data)
-    schedule.every().day.at("03:30").do(backup_server_settings)
     schedule.every().day.at("03:15").do(backup_app_settings)
+    # Архив входов — отдельное, более редкое расписание (логины
+    # случаются не каждые 15 секунд, частый опрос collect() здесь не
+    # нужен), и намеренно отдельный вызов от collect() выше — см.
+    # docstring collect_login_events().
+    schedule.every(5).minutes.do(collect_login_events)
 
     # Первый сбор через 5 секунд после старта
     time.sleep(5)
     collect()
     cleanup_old_data()
+    collect_login_events()
 
     # Бесконечный цикл
     while True:
@@ -2295,7 +2379,8 @@ def server_detail(server_id):
         cur=dict(current) if current else None,
         alerts_active=[dict(a) for a in alerts_active],
         alerts_history=[dict(a) for a in alerts_history],
-        logged_in=is_logged_in()
+        logged_in=is_logged_in(),
+        login_events_retention_days=LOGIN_EVENTS_RETENTION_DAYS
     )
 
 
@@ -2350,7 +2435,6 @@ def settings_page():
         tg_settings=tg_settings,
         mail_recipients=mail_recipients,
         mail_settings=mail_settings,
-        config_backup_keep=CONFIG_BACKUP_KEEP,
         app_backup_keep=APP_BACKUP_KEEP
     )
 
@@ -2443,6 +2527,107 @@ def api_history(server_id):
 
     rows = [dict(h) for h in history]
     return jsonify(_aggregate_history(rows))
+
+
+def _client_for_server(server_id):
+    """
+    Общий хелпер для скриншотов/событий — достаёт сервер из БД и
+    поднимает TrassirClient. Возвращает (client, None) при успехе или
+    (None, (response, status)) при ошибке — второй элемент можно сразу
+    отдать как return из вызывающего route.
+    """
+    conn = get_db()
+    server = conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone()
+    conn.close()
+    if not server:
+        return None, (jsonify({"ok": 0, "error": "Сервер не найден"}), 404)
+    client = TrassirClient({
+        "ip": server["ip"],
+        "port": server["port"],
+        "ssl": bool(server["ssl"]),
+        "sdk_password": server["sdk_password"]
+    })
+    return client, None
+
+
+# Скриншоты и события — живая картинка/лог с камер и сервера TRASSIR,
+# заметно чувствительнее обычных метрик CPU/дисков/архива (реальное
+# видео помещения, а в событиях — IP/логины админов TRASSIR). Остальные
+# /api/* read-роуты в этом файле намеренно открыты без логина (весь
+# дашборд читаемый, см. is_logged_in() — логин нужен только для
+# действий), но для этих трёх делаем исключение и требуем логин.
+@app.route("/api/channels/<int:server_id>")
+def api_channels(server_id):
+    """Список каналов сервера — для построения сетки скриншотов на странице сервера."""
+    if not is_logged_in():
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    client, err = _client_for_server(server_id)
+    if err:
+        return err
+    return jsonify(client.list_channels())
+
+
+@app.route("/api/screenshot/<int:server_id>/<channel_guid>")
+def api_screenshot(server_id, channel_guid):
+    """
+    Проксирует скриншот канала с TRASSIR — SDK-пароль сервера остаётся
+    на бэкенде и никогда не попадает в браузер, та же логика, по которой
+    sdk_password уже убирается из server_public в server_detail().
+    """
+    if not is_logged_in():
+        return "Требуется авторизация", 403
+    if not re.match(r'^[A-Za-z0-9_-]+$', channel_guid):
+        return "Некорректный GUID канала", 400
+    client, err = _client_for_server(server_id)
+    if err:
+        return "Сервер не найден", 404
+    result = client.get_screenshot(channel_guid)
+    if not result["ok"]:
+        return "", 502
+    resp = make_response(result["data"])
+    resp.headers["Content-Type"] = result["content_type"]
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/events/<int:server_id>")
+def api_events(server_id):
+    """Последние события TRASSIR (/events) — только для отображения, не трогает alerts/Telegram."""
+    if not is_logged_in():
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    client, err = _client_for_server(server_id)
+    if err:
+        return err
+    return jsonify(client.get_events())
+
+
+@app.route("/api/logins/<int:server_id>")
+def api_logins(server_id):
+    """
+    Локальный архив входов (login_events) — в отличие от /api/events
+    выше, читает НЕ TRASSIR вживую, а собственную БД, куда
+    collect_login_events() складывает события "Login Successful"
+    каждые 5 минут (см. её же docstring) и откуда их чистит
+    cleanup_old_data() по истечении LOGIN_EVENTS_RETENTION_DAYS.
+    Тот же login-гейт, что и у /api/events, /api/screenshot,
+    /api/channels — это тоже аудит-данные (кто и откуда логинился).
+    """
+    if not is_logged_in():
+        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
+    conn = get_db()
+    server = conn.execute("SELECT id FROM servers WHERE id = ?", (server_id,)).fetchone()
+    if not server:
+        conn.close()
+        return jsonify({"ok": 0, "error": "Сервер не найден"}), 404
+    rows = conn.execute("""
+        SELECT event_time, username, ip_address
+        FROM login_events
+        WHERE server_id = ?
+        ORDER BY event_time DESC
+        LIMIT 200
+    """, (server_id,)).fetchall()
+    conn.close()
+    return jsonify({"ok": 1, "logins": [dict(r) for r in rows]})
 
 
 @app.route("/api/servers", methods=["GET", "POST", "PUT", "DELETE"])
@@ -2677,78 +2862,6 @@ def import_servers():
         threading.Thread(target=collect).start()
 
     return jsonify({"ok": 1, "added": added, "updated": updated, "errors": errors})
-
-
-@app.route("/api/config-backup/run", methods=["POST"])
-def run_config_backup():
-    """
-    Запускает снятие бэкапа настроек всех активных регистраторов прямо
-    сейчас (вместо ожидания ночного расписания из scheduler()). Запускается
-    в фоновом потоке — запрос возвращается сразу, реальный результат по
-    каждому серверу виден через /api/config-backup/status после того, как
-    поток завершится.
-    """
-    if not session.get("logged_in"):
-        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
-
-    threading.Thread(target=backup_server_settings).start()
-    return jsonify({"ok": 1, "message": "Бэкап запущен в фоне"})
-
-
-@app.route("/api/config-backup/status")
-def config_backup_status():
-    """
-    Текущее состояние бэкапов настроек по каждому серверу: последний
-    результат (успех/ошибка) + список последних CONFIG_BACKUP_KEEP версий.
-    """
-    if not session.get("logged_in"):
-        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
-
-    conn = get_db()
-    servers = conn.execute("SELECT id, name FROM servers ORDER BY name").fetchall()
-
-    result = []
-    for server in servers:
-        backups = conn.execute(
-            "SELECT id, ts, ok, size_bytes, error FROM config_backups "
-            "WHERE server_id = ? ORDER BY ts DESC, id DESC LIMIT ?",
-            (server["id"], CONFIG_BACKUP_KEEP)
-        ).fetchall()
-        result.append({
-            "server_id": server["id"],
-            "server_name": server["name"],
-            "backups": [dict(b) for b in backups]
-        })
-    conn.close()
-
-    return jsonify({"ok": 1, "servers": result})
-
-
-@app.route("/api/config-backup/download/<int:backup_id>")
-def download_config_backup(backup_id):
-    """
-    Скачивает один конкретный файл бэкапа настроек по id строки
-    config_backups. file_path проверяется на существование — запись в
-    БД может пережить ротацию/удаление самого файла при редком гонке
-    между скачиванием и следующим backup_server_settings().
-    """
-    if not session.get("logged_in"):
-        return jsonify({"ok": 0, "error": "Требуется авторизация"}), 403
-
-    conn = get_db()
-    row = conn.execute(
-        "SELECT cb.file_path, cb.ts, s.name FROM config_backups cb "
-        "JOIN servers s ON s.id = cb.server_id WHERE cb.id = ? AND cb.ok = 1",
-        (backup_id,)
-    ).fetchone()
-    conn.close()
-
-    if not row or not row["file_path"] or not os.path.isfile(row["file_path"]):
-        return jsonify({"ok": 0, "error": "Файл бэкапа не найден"}), 404
-
-    safe_name = re.sub(r'[^\w.-]', '_', row["name"])
-    download_name = f"{safe_name}_settings_{row['ts'].replace(' ', '_').replace(':', '')}.json"
-    return send_file(row["file_path"], as_attachment=True, download_name=download_name)
 
 
 def _resolve_app_backup_path(filename):
@@ -3292,7 +3405,7 @@ def api_services_status():
 if __name__ != "__main__":
     # Вывод при запуске через gunicorn
     print("=" * 60)
-    print("  TRASSIR Monitor v13.0")
+    print("  TRASSIR Monitor v13.6")
     print("  Система мониторинга серверов TRASSIR")
     print("=" * 60)
 
@@ -4644,6 +4757,65 @@ cat > $INSTALL_DIR/templates/server.html << 'SERVEREOF'
     </div>
 </div>
 
+{% if logged_in %}
+<!-- Скриншоты камер и лента событий TRASSIR (SDK) — свёрнуты по
+     умолчанию, грузятся только по клику, чтобы не захламлять страницу
+     и не дёргать TRASSIR лишний раз на серверах, где это не нужно.
+     Полностью отдельная фича от health-опроса/алертов/Telegram —
+     ничего здесь не пишет в БД и не может их затронуть. -->
+<div class="row g-3 mt-1">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header" style="cursor:pointer;" onclick="toggleScreenshots()">
+                <span><i class="bi bi-camera"></i> Скриншоты камер</span>
+                <i class="bi bi-chevron-down" id="screenshotsChevron"></i>
+            </div>
+            <div class="card-body" id="screenshotsBody" style="display:none;">
+                <div id="screenshotsGrid" class="row g-2">
+                    <div class="col-12 text-center" style="color:var(--muted);">Нажмите на заголовок, чтобы загрузить</div>
+                </div>
+                <button class="btn btn-sm btn-outline-light mt-2" onclick="loadScreenshots()">
+                    <i class="bi bi-arrow-clockwise"></i> Обновить
+                </button>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header" style="cursor:pointer;" onclick="toggleEvents()">
+                <span><i class="bi bi-list-ul"></i> Лента событий TRASSIR</span>
+                <i class="bi bi-chevron-down" id="eventsChevron"></i>
+            </div>
+            <div class="card-body" id="eventsBody" style="display:none; max-height:420px; overflow-y:auto;">
+                <div id="eventsFeed" style="color:var(--muted);">Нажмите на заголовок, чтобы загрузить</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- История входов (архив) — отдельная от "Ленты событий" выше
+     карточка, прямой запрос пользователя: "Лента событий" читает
+     TRASSIR вживую и ничего не хранит, а размер/срок жизни буфера
+     событий на самом TRASSIR нигде не документирован — вход мог
+     потеряться безвозвратно, если никто не смотрел на дашборд в
+     момент, когда буфер провернулся. Эта карточка читает ЛОКАЛЬНУЮ
+     БД (/api/logins, см. collect_login_events()/login_events), а не
+     SDK — хранится до {{ login_events_retention_days }} дн. -->
+<div class="row g-3 mt-3">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header" style="cursor:pointer;" onclick="toggleLogins()">
+                <span><i class="bi bi-person-check"></i> История входов (архив, до {{ login_events_retention_days }} дн.)</span>
+                <i class="bi bi-chevron-down" id="loginsChevron"></i>
+            </div>
+            <div class="card-body" id="loginsBody" style="display:none; max-height:420px; overflow-y:auto;">
+                <div id="loginsFeed" style="color:var(--muted);">Нажмите на заголовок, чтобы загрузить</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
@@ -4803,6 +4975,238 @@ function dismissAlert(alertId) {
         });
 }
 
+// ============================================
+// СКРИНШОТЫ КАМЕР И ЛЕНТА СОБЫТИЙ (SDK)
+// Полностью отдельная фича от health/алертов/Telegram — ошибка здесь
+// (сервер не ответил на /screenshot или /events) никак не может
+// повлиять на остальную страницу или на данные collect(), это просто
+// показывает "не загрузилось" в своём блоке.
+// ============================================
+var screenshotsLoaded = false;
+var eventsPollTimer = null;
+
+function escHtml(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function toggleScreenshots() {
+    var body = document.getElementById('screenshotsBody');
+    var chevron = document.getElementById('screenshotsChevron');
+    var opening = body.style.display === 'none';
+    body.style.display = opening ? 'block' : 'none';
+    chevron.className = opening ? 'bi bi-chevron-up' : 'bi bi-chevron-down';
+    if (opening && !screenshotsLoaded) {
+        loadScreenshots();
+    }
+}
+
+function loadScreenshots() {
+    var grid = document.getElementById('screenshotsGrid');
+    grid.innerHTML = '<div class="col-12 text-center" style="color:var(--muted);">Загрузка...</div>';
+    fetch('/api/channels/{{ server.id }}')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            screenshotsLoaded = true;
+            if (!data.ok || !data.channels || !data.channels.length) {
+                grid.innerHTML = '<div class="col-12 text-center" style="color:var(--muted);">' +
+                    escHtml(data.error || 'Каналы не найдены') + '</div>';
+                return;
+            }
+            grid.innerHTML = '';
+            data.channels.forEach(function(ch) {
+                var col = document.createElement('div');
+                col.className = 'col-6 col-lg-4';
+                var cacheBust = Date.now();
+                var imgUrl = '/api/screenshot/{{ server.id }}/' + encodeURIComponent(ch.guid) + '?t=' + cacheBust;
+                col.innerHTML =
+                    '<div class="text-center">' +
+                    '<img src="' + imgUrl + '" alt="' + escHtml(ch.name) + '" ' +
+                    'style="width:100%; border-radius:6px; background:#000; aspect-ratio:16/9; object-fit:cover;" ' +
+                    'loading="lazy" onerror="this.style.opacity=0.3;" />' +
+                    '<div><small style="color:var(--muted);">' + escHtml(ch.name) + '</small></div>' +
+                    '</div>';
+                grid.appendChild(col);
+            });
+        })
+        .catch(function() {
+            screenshotsLoaded = false;
+            grid.innerHTML = '<div class="col-12 text-center" style="color:var(--muted);">Ошибка загрузки списка каналов</div>';
+        });
+}
+
+function toggleEvents() {
+    var body = document.getElementById('eventsBody');
+    var chevron = document.getElementById('eventsChevron');
+    var opening = body.style.display === 'none';
+    body.style.display = opening ? 'block' : 'none';
+    chevron.className = opening ? 'bi bi-chevron-up' : 'bi bi-chevron-down';
+    if (opening) {
+        loadEvents();
+        // Опрос идёт только пока блок реально раскрыт на экране — сворачивание
+        // останавливает таймер, чтобы открытая, но не просматриваемая страница
+        // не продолжала фоново дёргать /events каждую минуту.
+        if (!eventsPollTimer) {
+            eventsPollTimer = setInterval(loadEvents, 60000);
+        }
+    } else if (eventsPollTimer) {
+        clearInterval(eventsPollTimer);
+        eventsPollTimer = null;
+    }
+}
+
+// Перевод типов событий TRASSIR — только те, что реально подтверждены
+// (официальный SDK-мануал + живые события с реального сервера), никаких
+// придуманных вариантов на типы, которых мы не видели. Неизвестный тип
+// просто показывается как есть (английским) — лучше нейтральный фоллбэк,
+// чем выдуманный неверный перевод.
+//
+// Два типа ("Login Successful, %1 from %2", "Connected To %1 under %2")
+// TRASSIR отдаёт буквально с НЕподставленными %1/%2 — реальные значения
+// лежат в отдельных полях события (username/ip_address или
+// server_address/under_username), подстановка их в текст — это SDK-
+// особенность, не наша ошибка (проверено по официальному мануалу,
+// пример ответа там точно такой же).
+var EVENT_TRANSLATIONS = {
+    'Motion Start':          { text: 'Обнаружено движение' },
+    'Motion Stop':           { text: 'Движение прекратилось' },
+    'Signal Lost':           { text: 'Пропал сигнал' },
+    'Signal Restored':       { text: 'Сигнал восстановлен' },
+    'Connection Lost':       { text: 'Потеряно соединение' },
+    'Connection Established':{ text: 'Соединение установлено' },
+    'Health Turns Bad':      { text: 'Состояние здоровья ухудшилось' },
+    'Health Turns Good':     { text: 'Состояние здоровья нормализовалось' },
+    'Smoke Detected':        { text: 'Обнаружен дым' },
+    'Smoke Stopped':         { text: 'Дым больше не обнаруживается' },
+    'Object Size Alarm':     { text: 'Тревога: превышен размер объекта' },
+    'No Connection to Cloud':{ text: 'Нет соединения с облаком TRASSIR' },
+    'Login Successful, %1 from %2': {
+        render: function(ev) {
+            return 'Вход выполнен: ' + escHtml(ev.username || '?') + ' с ' + escHtml(ev.ip_address || '?');
+        },
+        skipExtra: true
+    },
+    'Connected To %1 under %2': {
+        render: function(ev) {
+            return 'Подключение к серверу ' + escHtml(ev.server_address || '?') + ' от имени ' + escHtml(ev.under_username || '?');
+        },
+        skipExtra: true
+    }
+};
+
+function translateEventType(ev) {
+    var raw = ev.type || 'Событие';
+    var entry = EVENT_TRANSLATIONS[raw];
+    if (!entry) { return { html: escHtml(raw), skipExtra: false }; }
+    if (entry.render) { return { html: entry.render(ev), skipExtra: !!entry.skipExtra }; }
+    return { html: escHtml(entry.text), skipExtra: false };
+}
+
+function loadEvents() {
+    var feed = document.getElementById('eventsFeed');
+    fetch('/api/events/{{ server.id }}')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.ok) {
+                feed.innerHTML = '<div style="color:var(--muted);">' + escHtml(data.error || 'Ошибка') + '</div>';
+                return;
+            }
+            if (!data.events || !data.events.length) {
+                feed.innerHTML = '<div style="color:var(--muted);">Событий пока нет</div>';
+                return;
+            }
+            feed.innerHTML = data.events.map(function(ev) {
+                var tsLabel = '';
+                if (ev.timestamp) {
+                    // timestamp от TRASSIR — в микросекундах (см. SDK-мануал), для JS Date нужны миллисекунды.
+                    //
+                    // {timeZone:'UTC'} ниже — НЕ ошибка и не означает "в UTC".
+                    // Живой баг, подтверждён пользователем: TRASSIR отдаёт это
+                    // значение уже посчитанным по часовому поясу, настроенному
+                    // НА САМОМ СЕРВЕРЕ (та самая оговорка в SDK-мануале — "The
+                    // response time is indicated ... according to time zone
+                    // configured on the server"), а не как честный UTC-эпох.
+                    // Без {timeZone:'UTC'} браузер в московском часовом поясе
+                    // (тот же +3, что весь остальной проект уже закладывает —
+                    // см. datetime('now', '+3 hours') в SQL по всему файлу)
+                    // добавлял сверху ЕЩЁ +3 часа при рендере через
+                    // toLocaleString(), то есть сдвиг применялся дважды:
+                    // событие в реальные 09:45 показывалось как 12:45.
+                    // {timeZone:'UTC'} запрещает Intl второй раз сдвигать уже
+                    // готовые часы/минуты из значения — то есть просто выводит
+                    // ровно те цифры, что прислал TRASSIR, без интерпретации.
+                    var ms = parseInt(ev.timestamp, 10) / 1000;
+                    if (!isNaN(ms)) { tsLabel = new Date(ms).toLocaleString('ru-RU', { timeZone: 'UTC' }); }
+                }
+                var translated = translateEventType(ev);
+                var extra = [];
+                // username/ip_address уже вшиты в переведённый текст для
+                // типов с skipExtra (Login Successful) — не дублируем их
+                // отдельной строкой под датой.
+                if (!translated.skipExtra) {
+                    if (ev.username) { extra.push(escHtml(ev.username)); }
+                    if (ev.ip_address) { extra.push(escHtml(ev.ip_address)); }
+                }
+                var extraStr = extra.length ? ' · ' + extra.join(' · ') : '';
+                return '<div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.05);">' +
+                    '<div>' + translated.html + '</div>' +
+                    '<small style="color:var(--muted);">' + escHtml(tsLabel) + extraStr + '</small>' +
+                    '</div>';
+            }).join('');
+        })
+        .catch(function() {
+            feed.innerHTML = '<div style="color:var(--muted);">Ошибка загрузки событий</div>';
+        });
+}
+
+// ============================================
+// ИСТОРИЯ ВХОДОВ (ЛОКАЛЬНЫЙ АРХИВ, не живой SDK-запрос)
+// ============================================
+function toggleLogins() {
+    var body = document.getElementById('loginsBody');
+    var chevron = document.getElementById('loginsChevron');
+    var opening = body.style.display === 'none';
+    body.style.display = opening ? 'block' : 'none';
+    chevron.className = opening ? 'bi bi-chevron-up' : 'bi bi-chevron-down';
+    if (opening) {
+        loadLogins();
+    }
+}
+
+function loadLogins() {
+    var feed = document.getElementById('loginsFeed');
+    feed.innerHTML = '<div style="color:var(--muted);">Загрузка...</div>';
+    fetch('/api/logins/{{ server.id }}')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.ok) {
+                feed.innerHTML = '<div style="color:var(--muted);">' + escHtml(data.error || 'Ошибка') + '</div>';
+                return;
+            }
+            if (!data.logins || !data.logins.length) {
+                feed.innerHTML = '<div style="color:var(--muted);">Входов в архиве пока нет</div>';
+                return;
+            }
+            // event_time уже лежит в БД готовой строкой (та же логика, что и
+            // alert.ts в карточке "Алерты" выше на этой странице) — никакого
+            // JS Date() здесь не нужно, повторного сдвига часового пояса тоже.
+            feed.innerHTML = data.logins.map(function(row) {
+                return '<div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.05);">' +
+                    '<div>' + escHtml(row.username || '?') + '</div>' +
+                    '<small style="color:var(--muted);">' + escHtml(row.event_time || '') +
+                    (row.ip_address ? ' · ' + escHtml(row.ip_address) : '') +
+                    '</small></div>';
+            }).join('');
+        })
+        .catch(function() {
+            feed.innerHTML = '<div style="color:var(--muted);">Ошибка загрузки истории входов</div>';
+        });
+}
+
 // Запуск
 loadHistory(0.5);
 refreshMetrics();
@@ -4859,8 +5263,8 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
 
 <div class="row g-4">
     <!-- Параметры мониторинга -->
-    {% if logged_in %}
     <div class="col-lg-6">
+    {% if logged_in %}
         <div class="card">
             <div class="card-header">
                 <i class="bi bi-sliders"></i> Параметры мониторинга
@@ -4932,8 +5336,36 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
                 </form>
             </div>
         </div>
-    </div>
     {% endif %}
+
+        <!-- Telegram секция — показывается если служба установлена.
+             Раньше жила в отдельном <div class="row g-4"> ниже модальных
+             окон вместе с Email — из-за этого она появлялась не сразу
+             под "Сменой пароля" в этой же колонке, а только после того,
+             как ПРАВАЯ колонка (Список серверов + Экспорт/импорт + Бэкап,
+             она длиннее) полностью заканчивалась: Bootstrap-строка не
+             начинает следующую строку, пока не закроется текущая с обеих
+             колонок. Перенесена прямо в эту колонку, чтобы идти сразу за
+             картой пароля, без ожидания соседней колонки. -->
+        <div id="telegramSection" class="mt-4" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <span><i class="bi bi-telegram"></i> Telegram уведомления</span>
+                </div>
+                <div class="card-body" id="telegramBody">
+                    {% if not logged_in %}
+                    <div class="text-center py-3">
+                        <i class="bi bi-lock" style="color:var(--muted);font-size:2rem;"></i>
+                        <p class="mt-2" style="color:var(--muted);">Войдите для управления Telegram</p>
+                        <a href="/login" class="btn btn-primary btn-sm">Войти</a>
+                    </div>
+                    {% else %}
+                    <p style="color:var(--muted);">Загрузка...</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Список серверов -->
     <div class="col-lg-6">
@@ -5019,29 +5451,6 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
             </div>
         </div>
 
-        <!-- Бэкап настроек регистраторов через SDK -->
-        <div class="card mt-4">
-            <div class="card-header">
-                <i class="bi bi-hdd-stack"></i> Бэкап настроек регистраторов (SDK)
-            </div>
-            <div class="card-body">
-                <p style="font-size:0.85rem; color:var(--muted);">
-                    Каждую ночь в 03:30 монитор сам снимает дерево настроек
-                    (сеть, камеры, архив и т.д.) с каждого активного регистратора
-                    через SDK-пароль и хранит последние {{ config_backup_keep }}
-                    версий на сервер. Это не тот же файл, что «Сохранить бэкап»
-                    в самом TRASSIR Client (<code>.settings-backup</code>/<code>.dump</code>) —
-                    тот создаётся кнопкой в клиенте и SDK его не видит, это
-                    отдельный JSON-снимок для просмотра/диагностики.
-                </p>
-                <button class="btn btn-outline-primary btn-sm mb-3" onclick="runConfigBackupNow()">
-                    <i class="bi bi-play-fill"></i> Снять бэкап сейчас
-                </button>
-                <div id="configBackupResult" class="mb-2"></div>
-                <div id="configBackupList">Загрузка...</div>
-            </div>
-        </div>
-
         <!-- Бэкап настроек монитора (серверы + Telegram + Email) -->
         <div class="card mt-4">
             <div class="card-header">
@@ -5064,6 +5473,30 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
             </div>
         </div>
         {% endif %}
+
+        <!-- Mail секция — показывается если служба установлена.
+             Перенесена в эту колонку по той же причине, что и Telegram
+             выше (см. комментарий там) — раньше ждала конца соседней
+             строки вместо того, чтобы идти сразу за "Бэкап настроек
+             монитора". -->
+        <div id="mailSection" class="mt-4" style="display:none;">
+            <div class="card">
+                <div class="card-header">
+                    <span><i class="bi bi-envelope"></i> Email уведомления</span>
+                </div>
+                <div class="card-body" id="mailBody">
+                    {% if not logged_in %}
+                    <div class="text-center py-3">
+                        <i class="bi bi-lock" style="color:var(--muted);font-size:2rem;"></i>
+                        <p class="mt-2" style="color:var(--muted);">Войдите для управления Email</p>
+                        <a href="/login" class="btn btn-primary btn-sm">Войти</a>
+                    </div>
+                    {% else %}
+                    <p style="color:var(--muted);">Загрузка...</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -5154,49 +5587,6 @@ cat > $INSTALL_DIR/templates/settings.html << 'SETTINGSEOF'
     </div>
 </div>
 {% endif %}
-
-<!-- Telegram и Mail секции -->
-<div class="row g-4 mt-0">
-<!-- Telegram секция — показывается если служба установлена -->
-<div class="col-lg-6" id="telegramSection" style="display:none;">
-    <div class="card">
-        <div class="card-header">
-            <span><i class="bi bi-telegram"></i> Telegram уведомления</span>
-        </div>
-        <div class="card-body" id="telegramBody">
-            {% if not logged_in %}
-            <div class="text-center py-3">
-                <i class="bi bi-lock" style="color:var(--muted);font-size:2rem;"></i>
-                <p class="mt-2" style="color:var(--muted);">Войдите для управления Telegram</p>
-                <a href="/login" class="btn btn-primary btn-sm">Войти</a>
-            </div>
-            {% else %}
-            <p style="color:var(--muted);">Загрузка...</p>
-            {% endif %}
-        </div>
-    </div>
-</div>
-
-<!-- Mail секция — показывается если служба установлена -->
-<div class="col-lg-6" id="mailSection" style="display:none;">
-    <div class="card">
-        <div class="card-header">
-            <span><i class="bi bi-envelope"></i> Email уведомления</span>
-        </div>
-        <div class="card-body" id="mailBody">
-            {% if not logged_in %}
-            <div class="text-center py-3">
-                <i class="bi bi-lock" style="color:var(--muted);font-size:2rem;"></i>
-                <p class="mt-2" style="color:var(--muted);">Войдите для управления Email</p>
-                <a href="/login" class="btn btn-primary btn-sm">Войти</a>
-            </div>
-            {% else %}
-            <p style="color:var(--muted);">Загрузка...</p>
-            {% endif %}
-        </div>
-    </div>
-</div>
-</div>
 
 {% endblock %}
 
@@ -5309,64 +5699,6 @@ async function importServers() {
         resultDiv.innerHTML = '<div class="alert alert-danger py-2 mb-0">' + escapeHtml(result.error || 'Ошибка импорта') + '</div>';
     }
 }
-
-function renderConfigBackups(data) {
-    var listDiv = document.getElementById('configBackupList');
-    if (!data.servers || !data.servers.length) {
-        listDiv.innerHTML = '<p class="text-muted mb-0">Нет добавленных серверов</p>';
-        return;
-    }
-    var html = '<table class="table table-sm"><thead><tr><th>Сервер</th><th>Последний бэкап</th><th>Версии</th></tr></thead><tbody>';
-    data.servers.forEach(function(srv) {
-        var last = srv.backups.length ? srv.backups[0] : null;
-        var lastCell;
-        if (!last) {
-            lastCell = '<span class="text-muted">ещё не снимался</span>';
-        } else if (last.ok) {
-            lastCell = '<span style="color:var(--green);">✅ ' + escapeHtml(last.ts) + '</span>';
-        } else {
-            lastCell = '<span style="color:var(--red);" title="' + escapeHtml(last.error) + '">❌ ' + escapeHtml(last.ts) + '</span>';
-        }
-        var versions = srv.backups.filter(function(b) { return b.ok; }).map(function(b) {
-            return '<a href="/api/config-backup/download/' + b.id + '" class="btn btn-outline-secondary btn-sm me-1 mb-1">' +
-                   escapeHtml(b.ts) + ' (' + Math.round(b.size_bytes / 1024) + ' КБ)</a>';
-        }).join('');
-        html += '<tr><td>' + escapeHtml(srv.server_name) + '</td><td>' + lastCell + '</td><td>' +
-                (versions || '<span class="text-muted">—</span>') + '</td></tr>';
-    });
-    html += '</tbody></table>';
-    listDiv.innerHTML = html;
-}
-
-async function loadConfigBackupStatus() {
-    try {
-        var r = await fetch('/api/config-backup/status');
-        var data = await r.json();
-        if (r.ok) renderConfigBackups(data);
-        else document.getElementById('configBackupList').innerHTML = '<p class="text-danger mb-0">Ошибка загрузки статуса</p>';
-    } catch (e) {
-        document.getElementById('configBackupList').innerHTML = '<p class="text-danger mb-0">Ошибка загрузки статуса</p>';
-    }
-}
-
-async function runConfigBackupNow() {
-    var resultDiv = document.getElementById('configBackupResult');
-    resultDiv.innerHTML = '<div class="alert alert-info py-2 mb-0">Запущено, обновление через несколько секунд...</div>';
-    var r = await fetch('/api/config-backup/run', { method: 'POST' });
-    var result = await r.json();
-    if (!r.ok) {
-        resultDiv.innerHTML = '<div class="alert alert-danger py-2 mb-0">' + escapeHtml(result.error || 'Ошибка запуска') + '</div>';
-        return;
-    }
-    setTimeout(function() {
-        resultDiv.innerHTML = '';
-        loadConfigBackupStatus();
-    }, 8000);
-}
-
-{% if logged_in %}
-loadConfigBackupStatus();
-{% endif %}
 
 function jsStringToAttr(s) {
     // Строит JS-строковый литерал ('...') для вставки в onclick="...",
@@ -5975,7 +6307,7 @@ echo ""
 # Gunicorn конфигурация
 echo "  • Создание конфигурации Gunicorn..."
 cat > $INSTALL_DIR/gunicorn_config.py << GUNEOF
-# Конфигурация Gunicorn для TRASSIR Monitor v13.0
+# Конфигурация Gunicorn для TRASSIR Monitor v13.6
 # Использует gevent для поддержки WebSocket (совместим с Python 3.12+/3.13)
 
 bind = "127.0.0.1:${APP_PORT}"
@@ -5994,7 +6326,7 @@ echo "    ✓ gunicorn_config.py создан"
 echo "  • Создание systemd сервиса..."
 cat > /etc/systemd/system/$SERVICE.service << SERVEOF
 [Unit]
-Description=TRASSIR Monitor v13.0
+Description=TRASSIR Monitor v13.6
 Documentation=https://github.com/trassir-monitor
 After=network-online.target
 Wants=network-online.target
@@ -6035,7 +6367,7 @@ echo "    ✓ nginx drop-in создан"
 # Nginx конфигурация
 echo "  • Создание конфигурации Nginx..."
 cat > /etc/nginx/sites-available/trassir-monitor << NGINXEOF
-# Nginx конфигурация для TRASSIR Monitor v13.0
+# Nginx конфигурация для TRASSIR Monitor v13.6
 server {
     listen $WEB_PORT default_server;
     listen [::]:$WEB_PORT default_server;
@@ -6476,9 +6808,9 @@ echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                              ║${NC}"
 if [ "$IS_UPDATE" -eq 1 ]; then
-echo -e "${GREEN}║   TRASSIR Monitor v13.0 — ОБНОВЛЁН!          ║${NC}"
+echo -e "${GREEN}║   TRASSIR Monitor v13.6 — ОБНОВЛЁН!          ║${NC}"
 else
-echo -e "${GREEN}║   TRASSIR Monitor v13.0 — УСТАНОВЛЕН!        ║${NC}"
+echo -e "${GREEN}║   TRASSIR Monitor v13.6 — УСТАНОВЛЕН!        ║${NC}"
 fi
 echo -e "${GREEN}║                                              ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════╝${NC}"
